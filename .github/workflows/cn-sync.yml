@@ -1,0 +1,156 @@
+name: 国服同步（国际服 → 佳速度）
+
+# 为什么存在：把国际服的活动复制一份到国服（connect.garmin.cn / 佳速度），
+# 用于国内社交、排行榜、挑战赛、勋章。用户 2026-10-20 明确要的是这个。
+#
+# ⚠️ 只复制**活动**。HRV / 静息心率 / 睡眠 / 训练状态 / 训练负荷 / 步数全都不过去，
+#    所以国服永远不能当教练分析源，周报只认国际服。
+# ⚠️ 微信运动步数同步不了：步数属于日常活动（dailies），FIT 活动文件里没有这项。
+#
+# ⚠️ 与「Garmin token 保活」共用同一族 token（国际服 + 国服各一套，都是轮转的）。
+#    两个工作流绝不能同时跑：谁后写 secret 谁赢，另一个手里的就成废票。
+#    所以 concurrency group 必须与 token-keepalive.yml **完全相同**。
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "回溯天数（默认 7，会自动跳过国服已有的）"
+        type: string
+        default: "7"
+      dry_run:
+        description: "只演练不上传"
+        type: boolean
+        default: false
+      selftest:
+        description: "自检：强制发一条通知（验证微信链路没坏）"
+        type: boolean
+        default: false
+  schedule:
+    # 13:30 UTC = 北京 21:30（晚上骑完、手表已同步到国际服）
+    - cron: "30 13 * * *"
+    # 22:30 UTC = 北京 06:30 次日（兜底：前一班被 GitHub 延迟或失败）
+    # 注意 GitHub 的 cron 延迟可达 5-8h，所以两班并不保证准点，只是多一次机会
+    - cron: "30 22 * * *"
+
+concurrency:
+  group: garmin-tokens
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      TZ: Asia/Shanghai
+
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 还原两套 token（国际服 + 国服）
+        env:
+          INTL_B64: ${{ secrets.GARMIN_TOKENS_B64 }}
+          CN_B64: ${{ secrets.GARMIN_CN_TOKENS_B64 }}
+        run: |
+          if [ -z "$INTL_B64" ]; then
+            echo "::error::缺少 secret GARMIN_TOKENS_B64（国际服）"; exit 1
+          fi
+          if [ -z "$CN_B64" ]; then
+            echo "::error::缺少 secret GARMIN_CN_TOKENS_B64（国服）—— 本地跑 --auth 后 gh secret set 上传"; exit 1
+          fi
+          mkdir -p ~/.garminconnect ~/.garminconnect-cn
+          echo "$INTL_B64" | base64 -d > ~/.garminconnect/garmin_tokens.json
+          echo "$CN_B64"   | base64 -d > ~/.garminconnect-cn/garmin_tokens.json
+          chmod 600 ~/.garminconnect/garmin_tokens.json ~/.garminconnect-cn/garmin_tokens.json
+          # 解出来的东西先验一遍：secret 里若存成了半截，这里立刻暴露，
+          # 而不是等 login 报一个看不懂的错。
+          python3 check_garmin_tokens.py ~/.garminconnect/garmin_tokens.json \
+                                         ~/.garminconnect-cn/garmin_tokens.json
+          echo "::notice::两套 token 已就位"
+
+      - name: 执行同步
+        id: sync
+        env:
+          DAYS: ${{ inputs.days || '7' }}
+          DRY: ${{ inputs.dry_run == true && '1' || '0' }}
+        run: |
+          ARGS="--sync --days $DAYS --summary-out /tmp/cn_sync_summary.md"
+          if [ "$DRY" = "1" ]; then ARGS="$ARGS --dry-run"; fi
+          echo "→ python sync_garmin_cn.py $ARGS"
+          python sync_garmin_cn.py $ARGS
+
+      # 回写必须在 always() 里：同步中途失败时 token 可能已经被刷新过，
+      # 不写回 = 轮转结果被丢弃 = 明天整族失效（10/19 事故的机制）。
+      - name: 回写两套 token（自愈）
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::缺少 secret GH_PAT —— 无法把轮转后的 token 写回，链条会断"
+            exit 1
+          fi
+          for pair in "GARMIN_TOKENS_B64:$HOME/.garminconnect/garmin_tokens.json" \
+                      "GARMIN_CN_TOKENS_B64:$HOME/.garminconnect-cn/garmin_tokens.json"; do
+            name="${pair%%:*}"
+            file="${pair#*:}"
+            if [ ! -f "$file" ]; then
+              echo "::warning::$name 的 token 文件不存在（$file），跳过"
+              continue
+            fi
+            # ⚠️ 回写前必须校验，别把损坏的文件盖到 secret 上（那会把好 token 一起搞死）。
+            if ! python3 check_garmin_tokens.py "$file"; then
+              echo "::error::$name 的 token 文件不合法，**拒绝回写** —— 保持 secret 里原来的值"
+              exit 1
+            fi
+            base64 -w0 "$file" > /tmp/t.b64
+            gh secret set "$name" --repo "${{ github.repository }}" --body "$(cat /tmp/t.b64)"
+            echo "::notice::$name 已回写（校验通过）"
+          done
+
+      # ── 以下两步是「附加品」，一律排在 token 回写之后 ──────────────────────
+      # 回写才是救命路径（不写 = 明天整族 token 失效，10/19 事故）。通知慢一点
+      # 没关系，但绝不能让通知的耗时/重试把回写挤到后面去。
+      #
+      # 只在**真有新活动上传**时通知：0 条新活动是这个系统绝大多数日子的
+      # 正常状态（没骑车就没数据），每天推一条「0 条」纯属噪音。
+      #
+      # selftest：手动 trigger 时强制发一条，用来验证微信链路。没有这个开关，
+      #   「通知坏了」只有在真骑完车那天才暴露 —— 那时用户会以为是同步失败，
+      #   根本分不清是哪一环断了。
+      - name: 成功时发微信（仅当有新活动）
+        if: success() && ((steps.sync.outputs.uploaded != '0' && steps.sync.outputs.uploaded != '') || inputs.selftest == true)
+        env:
+          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
+        run: |
+          if [ ! -s /tmp/cn_sync_summary.md ]; then
+            printf '**🧪 通知自检**\n\n链路正常 —— 这条是手动触发的测试消息，不代表有新活动同步。\n' > /tmp/cn_sync_summary.md
+          fi
+          python notify_wecom.py --message-file /tmp/cn_sync_summary.md \
+            || echo "::warning::成功通知没发出去（同步本身已完成，不影响数据）"
+
+      - name: 失败时发微信告警
+        if: failure()
+        env:
+          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
+        run: |
+          python notify_wecom.py --alert "国服同步失败（$(date +%F)）
+          可能是：国服 token 失效（本地跑 --auth 后 gh secret set GARMIN_CN_TOKENS_B64）、
+          国际服 token 失效、或国服风控。
+          注意活动本身没丢，只是没复制到国服，重跑即可（已传的会被指纹跳过）。
+          日志：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+          || echo "（告警发送也失败了，只能靠 Actions 页面发现）"

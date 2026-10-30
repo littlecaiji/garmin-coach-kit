@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "updated": null,
+  "ftp": {
+    "current": 200.0,
+    "estimate": null,
+    "history": []
+  },
+  "strength": {
+    "weights": {
+      "bridge": 20.0,
+      "rdl": 20.0,
+      "split_squat": 8.0,
+      "hipflex": 2.0,
+      "sl_bridge": 10.0,
+      "sl_rdl": 8.0
+    },
+    "consecutive_missed": 0,
+    "consecutive_done": 0,
+    "mode": "full"
+  },
+  "quality": {
+    "threshold": {
+      "sets": 3,
+      "reps": 10,
+      "consecutive_ok": 0
+    },
+    "vo2": {
+      "sets": 5,
+      "reps": 3,
+      "consecutive_ok": 0
+    }
+  },
+  "endurance": {
+    "long_ride_min": 135,
+    "consecutive_long_ok": 0,
+    "last_long_min": 0
+  },
+  "goal": {
+    "name": "示例：单日 200km",
+    "date": "2099-01-01",
+    "phase": "base"
+  },
+  "last_advanced_week": null,
+  "decisions": []
+}

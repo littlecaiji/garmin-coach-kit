@@ -1,0 +1,233 @@
+name: Garmin 周报 · 云端
+
+# 2026-10-08 首次探针通过：Garmin 接受 Azure 数据中心 IP（出口 20.42.9.229）的会话，
+# 报告生成结果与本地逐字一致 → 正式启用每周定时。
+
+on:
+  workflow_dispatch:        # 手动触发（Actions 页面点 Run workflow）
+    inputs:
+      dry_run:
+        description: "只演练不真的推课表（push_plan_to_connect.py --dry-run）"
+        type: boolean
+        default: false
+  push:                     # 代码更新后自动跑一次验证（只验报告链路，不动 Garmin 课表）
+    branches: [main]
+
+  schedule:
+    # ⚠️ 全部按 UTC 写：北京周一 07:00 = 周日 23:00 UTC —— **跨了 UTC 的日期边界**。
+    # 所以作业级必须设 TZ=Asia/Shanghai（见 jobs.report.env），否则
+    # analyze_training.py / coach_state 里的 datetime.now() 拿到的是「周日」，
+    # 会去算上上周；闸门也会把 W42 当成「本周」从而把整次运行静默跳过。
+    #
+    # ⚠️ 2026-10-12 实测：定时器在负载高时会「延迟甚至直接丢弃」某次调度，
+    # 且没有任何 API 能确认它有没有被执行（10/12 两条分别延迟到 14:33 / 17:14）。
+    # 所以补一条 1.5 小时后的兜底：第一条正常时它是空跑（被幂等闸门挡掉），
+    # 第一条被丢弃时它顶上。代价只有几分钟 runner 时间。
+    #
+    # 结论：7:00 是「最早开始执行」的时间，不是「保证送达」的时间；
+    # 想要准点必须靠本地定时触发（workflow_dispatch），GitHub 的 cron 给不了这个保证。
+    - cron: "0 23 * * 0"       # 北京周一 07:00（周日 23:00 UTC）
+    - cron: "30 0 * * 1"       # 北京周一 08:30（兜底）
+
+# 串行化：两条 cron 有可能几乎同时触发（第一条被延迟到第二条附近），
+# 并发跑会同时读到「本周还没跑过」并各自去 commit，后推的那个必然非快进失败。
+# 用 concurrency 让它们排队而不是并行——这正是幂等闸门能生效的前提。
+# 注意 push 触发的冒烟测试也走这个组，所以它同样不会和定时任务抢 state。
+#
+# ⚠️ group 与 token-keepalive / cn-sync **共用同一个名字**：这三个工作流都会
+#    刷新 Garmin token 并回写 secret，而 refresh token 是轮转的（谁后写谁赢，
+#    另一个手里的立刻变废票）。串行化是唯一安全的做法。
+concurrency:
+  group: garmin-tokens
+  cancel-in-progress: false
+
+permissions:
+  contents: write           # 需要写权限才能把报告提交回仓库
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      # 云端 runner 默认 UTC。整条链路（analyze_training.py / coach_state.py /
+      # 报告日期 / 闸门算周）都按北京时区走：7:00 北京 = 周日 23:00 UTC，
+      # 不设这个会在 UTC 的「周日」上算错一周（详见 schedule 注释）。
+      TZ: Asia/Shanghai
+      # 2026-10-30 起：「代码仓库」与「数据仓库」物理分离。
+      # 本仓库已开源，不含任何个人生理数据；state 与报告都在私有仓库里。
+      # 所有脚本通过 DATA_DIR 定位 state（见 coach_state._resolve_data_root）。
+      DATA_DIR: ${{ github.workspace }}/data
+      DATA_REPO: littlecaiji/garmin-training-data
+
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      # 数据仓库必须**单独 checkout**。不这么做的话 state 就得跟着代码走，
+      # 而 state 里有 HRV / 静息心率 / 体重 / 负重 / 目标 —— 属敏感个人信息，
+      # 一旦进公开仓库就会被 fork、镜像、搜索引擎永久缓存，删不干净。
+      - name: 拉取数据仓库（私有）
+        uses: actions/checkout@v4
+        with:
+          repository: littlecaiji/garmin-training-data
+          token: ${{ secrets.GH_PAT }}
+          path: data
+
+      - name: 检查本周是否已跑过（幂等闸门）
+        # 有两条 cron，必须保证本周只真正跑一次，否则会重复推课表、重复发微信。
+        # 判据用 state.last_advanced_week：它由 advance() 在「生成周报」那一步写入
+        # 并被提交回仓库，所以它等于本周 ISO 周号 ⇒ 本周的报告已经生成过。
+        # 报告步骤失败时 state 不会提交，闸门保持「没跑过」，重试仍然有效。
+        #
+        # push 事件不参与判断——它本来就只做冒烟测试（只生成+打印，无副作用）。
+        id: gate
+        run: |
+          # 必须按北京时区算周号：07:00 北京时 UTC 还是周日（上一周），
+          # 用 timezone.utc 会把 W42 误判成「本周」→ 整次运行被静默跳过。
+          WEEK=$(python3 -c "import datetime;from zoneinfo import ZoneInfo;i=datetime.datetime.now(ZoneInfo('Asia/Shanghai')).isocalendar();print(f'{i[0]}-W{i[1]:02d}')")
+          DONE=$(python3 -c "import json;print(json.load(open('$DATA_DIR/state/training_state.json')).get('last_advanced_week') or '')")
+          echo "本周=$WEEK  state.last_advanced_week=${DONE:-（空）}"
+          if [ "$DONE" = "$WEEK" ]; then
+            echo "ran=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::本周（$WEEK）的周报已经生成过 —— 跳过，避免重复推送"
+          else
+            echo "ran=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 写入 Garmin 登录态
+        env:
+          GARMIN_TOKENS_B64: ${{ secrets.GARMIN_TOKENS_B64 }}
+        run: |
+          if [ -z "$GARMIN_TOKENS_B64" ]; then
+            echo "::error::缺少 secret GARMIN_TOKENS_B64，请先按 README 添加"
+            exit 1
+          fi
+          mkdir -p ~/.garminconnect
+          echo "$GARMIN_TOKENS_B64" | base64 -d > ~/.garminconnect/garmin_tokens.json
+          chmod 600 ~/.garminconnect/garmin_tokens.json
+          echo "token 已写入（$(wc -c < ~/.garminconnect/garmin_tokens.json) bytes）"
+
+      - name: 运行探针（确认会话仍有效）
+        if: github.event_name == 'push' || steps.gate.outputs.ran != 'true'
+        run: python probe_garmin.py
+
+      - name: 生成周报
+        # LLM_API_KEY 是可选的：配了就多一段「教练点评」，没配/超时/报错
+        # 都只是少那段话，报告的其余部分与课表推送不受任何影响。
+        if: github.event_name == 'push' || steps.gate.outputs.ran != 'true'
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
+        run: python analyze_training.py
+
+      - name: 回写刷新后的 token（自愈）
+        # 2026-10-19 加。analyze/probe 登录时若 token 快到期会自动 refresh，
+        # 而 refresh token 是轮转的 —— 不回写的话，本次运行就把 secret 里那枚
+        # 变成了废票，第二天的保活任务会拿到一张死票（周报一跑完、周二就崩）。
+        # 因此每次运行结束都把当前 token 原样写回 secret；没刷新过时写的是同一个值，
+        # 无副作用。失败不影响主流程。
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          TOKEN="$HOME/.garminconnect/garmin_tokens.json"
+          if [ -f "$TOKEN" ] && [ -n "$GH_TOKEN" ]; then
+            base64 -w0 "$TOKEN" > /tmp/token.b64
+            gh secret set GARMIN_TOKENS_B64 --repo "${{ github.repository }}" \
+              --body "$(cat /tmp/token.b64)"
+            echo "::notice::token 已回写 secret"
+          else
+            echo "::warning::没有 token 文件或缺少 GH_PAT，跳过回写"
+          fi
+
+      - name: 在日志里直接打印报告
+        if: github.event_name == 'push' || steps.gate.outputs.ran != 'true'
+        run: cat outputs/training_report.md
+
+      - name: 归档报告到数据仓库
+        # 与课表推送、微信通知同一条铁律：改代码（push 事件）只做冒烟测试——
+        # 生成报告 + 打印 + 传 artifact，但**不产生任何副作用**（不回写仓库、
+        # 不动 Garmin、不发微信）。否则每推一次代码就多一个「周报」提交，历史很吵。
+        if: github.event_name != 'push' && steps.gate.outputs.ran != 'true'
+        run: |
+          mkdir -p "$DATA_DIR/reports"
+          cp outputs/training_report.md "$DATA_DIR/reports/$(date +%F).md"
+          cp outputs/training_report.md "$DATA_DIR/reports/latest.md"
+
+      - name: 提交回数据仓库
+        if: github.event_name != 'push' && steps.gate.outputs.ran != 'true'
+        # 提交信息里的 [skip ci] 是必须的——否则这次 push 会再次触发本工作流，
+        # 而报告带时间戳、每次内容都不同，会形成无限循环。
+        #
+        # state/ 必须一起提交：它是跨周记忆（负重递进、质量课档位、长骑基准、
+        # 目标阶段）。不提交的话每周都会从默认值冷启动，「自适应」就断了。
+        #
+        # 2026-10-30 起提交目标是**数据仓库**（working-directory: data），
+        # 不是本仓库。本仓库只装代码，落盘的东西一律不进公开历史。
+        working-directory: data
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "报告与状态均无变化，跳过提交"
+            exit 0
+          fi
+          git commit -m "周报 $(date +%F) [skip ci]"
+          git push
+
+      - name: 推送课表到 Garmin Connect
+        # 只在「定时」和「手动触发」时动 Garmin 课表。代码 push 不推——
+        # 否则每次改代码都会重排用户日历上的训练课，属于意外副作用。
+        #
+        # 顺序刻意放在归档/提交之后：课表推送要写 Garmin，属于外部副作用，
+        # 万一 Garmin 侧出问题，报告已经安全落库，不会白跑。
+        if: github.event_name != 'push' && steps.gate.outputs.ran != 'true'
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "::notice::dry-run 模式 —— 只打印将要推送的内容，不写 Garmin"
+            python push_plan_to_connect.py --dry-run
+          else
+            python push_plan_to_connect.py
+          fi
+
+      - name: 推送到微信（企业微信机器人）
+        # 与课表推送同一条铁律：只在「定时」和「手动触发」时发，改代码不发。
+        # 用 always() 是刻意的——即使上一步推课表失败，也保证报告能送到手上；
+        # 消息里会带上完整报告的仓库链接，所以只推摘要不会丢信息。
+        if: always() && github.event_name != 'push' && steps.gate.outputs.ran != 'true'
+        env:
+          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
+        run: python notify_wecom.py
+
+      - name: 失败时发微信告警
+        # ⚠️ 2026-10-12 补上。此前失败是**完全静默**的：报告生成一挂，
+        # notify_wecom 找不到报告文件、只打一句 warning 就退出，用户什么都收不到，
+        # 只能靠「今天怎么没收到报告」来发现。当天 Garmin token 失效就是如此。
+        # 现在任何一步失败，都会收到一条带日志链接的微信。
+        if: failure() && github.event_name != 'push'
+        env:
+          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
+        run: |
+          python notify_wecom.py --alert "周报流程失败（$(date +%F)）
+          点此查看日志：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      - name: 上传报告为 artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: training-report
+          path: outputs/training_report.md
+          if-no-files-found: warn

@@ -1,0 +1,109 @@
+name: Garmin token 保活
+
+# 为什么存在：Garmin 的 refresh token 是**轮转**的（每次刷新旧值作废）。
+# token 以前存在本地文件里，刷新结果会被 dump 回同一个文件，链条自动延续；
+# 2026-10-19 的故障正是「secret 是只读快照」导致轮转结果被丢弃，
+# 一周后整族失效，本地和云端同时登不上。
+#
+# 这个工作流每天刷新一次 token，并用 PAT 把新值写回 GARMIN_TOKENS_B64，
+# 让「轮转结果能回写」，从而恢复以前那种「永远不用管」的状态。
+#
+# ⚠️ 需要 secret GH_PAT：能写本仓库 Actions secrets 的 token
+#    （classic PAT 的 repo scope 即可；更稳妥的是只给本仓库
+#     Secrets: Read/Write 的 fine-grained PAT）。
+# ⚠️ workflow 自带的 GITHUB_TOKEN **没有**写 secret 的权限，所以必须用 PAT。
+
+on:
+  workflow_dispatch:        # 手动验证用
+    inputs:
+      force:
+        description: "无视剩余寿命强制刷新（测试写回链路用）"
+        type: boolean
+        default: false
+  schedule:
+    # 一天两班，间隔 12h：脚本只在「剩余寿命 < 12h」时才真正刷新，
+    # 所以两班中必有一班命中，且不会产生无意义的额外轮转。
+    # 21:00 UTC = 北京 05:00（比 07:00 的周报早 2h，保证周报用上新鲜 token）
+    - cron: "0 21 * * *"
+    # 09:00 UTC = 北京 17:00（兜底：05:00 那班失败时还有一次机会）
+    - cron: "0 9 * * *"
+
+# 两班可能重叠（延迟时会撞车），刷新是「读-改-写 secret」，必须串行。
+# ⚠️ group 名字与 cn-sync.yml **必须一致**：国服同步也会刷新国际服 token 并回写，
+#    两个工作流同时跑 = 谁后写谁赢，另一个手里的 token 立刻变废票。
+concurrency:
+  group: garmin-tokens
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      # runner 默认 UTC；日志里的「剩余寿命 / 新 exp」按北京时间显示，避免误读
+      TZ: Asia/Shanghai
+
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 还原 token（从 secret）
+        env:
+          GARMIN_TOKENS_B64: ${{ secrets.GARMIN_TOKENS_B64 }}
+        run: |
+          if [ -z "$GARMIN_TOKENS_B64" ]; then
+            echo "::error::缺少 secret GARMIN_TOKENS_B64"
+            exit 1
+          fi
+          mkdir -p ~/.garminconnect
+          echo "$GARMIN_TOKENS_B64" | base64 -d > ~/.garminconnect/garmin_tokens.json
+          chmod 600 ~/.garminconnect/garmin_tokens.json
+
+      - name: 刷新 token
+        id: keepalive
+        env:
+          FORCE_REFRESH: ${{ inputs.force == true && '1' || '0' }}
+        run: python keepalive_token.py
+
+      - name: 写回 secret（仅当 token 真的变了）
+        if: steps.keepalive.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::缺少 secret GH_PAT —— 无法把新 token 写回 secret，链条会断"
+            exit 1
+          fi
+          base64 -w0 ~/.garminconnect/garmin_tokens.json > /tmp/token.b64
+          gh secret set GARMIN_TOKENS_B64 --repo "${{ github.repository }}" \
+            --body "$(cat /tmp/token.b64)"
+          echo "::notice::GARMIN_TOKENS_B64 已更新（新 exp=${{ steps.keepalive.outputs.exp }}）"
+
+      - name: 无需刷新时的提示
+        if: steps.keepalive.outputs.changed != 'true'
+        run: echo "::notice::本次未刷新（token 剩余寿命仍充足）"
+
+      - name: 失败时发微信告警
+        # 早发现：token 一死就当天报警，而不是等下周一生成报告时才暴露。
+        if: failure()
+        env:
+          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
+        run: |
+          python notify_wecom.py --alert "Garmin token 保活失败（$(date +%F)）
+          refresh token 可能已失效 → 需要在本地跑 work/garmin_relogin.py 重新登录，
+          然后 gh secret set GARMIN_TOKENS_B64 同步。
+          日志：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+          || echo "（告警发送也失败了，只能靠 Actions 页面发现）"

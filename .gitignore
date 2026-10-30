@@ -1,0 +1,35 @@
+# 凭据 / 会话 token —— 永不入库
+garmin_tokens.json
+oauth1_token.json
+oauth2_token.json
+.garminconnect/
+.garminconnect-cn/
+*.token
+.env
+
+# 生成物
+outputs/
+*.log
+
+# ⚠️ 2026-10-30 拆库后，以下两类属于**个人数据**，只存在于私有数据仓库
+#    garmin-training-data，绝不允许出现在本仓库（本仓库是公开的）。
+#    state/   = FTP / 负重 / HRV 闸门结论 / 决策日志
+#    reports/ = 每周报告（含 HRV、静息心率、睡眠、体重、FTP）
+#    数据目录通过 DATA_DIR 定位，见 coach_state._resolve_data_root()。
+state/
+reports/
+data/
+
+# 轨迹文件：含住址与常去地点（起终点就是家门口），永不入库
+*.gpx
+*.fit
+*.tcx
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# macOS
+.DS_Store
