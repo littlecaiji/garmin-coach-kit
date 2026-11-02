@@ -494,6 +494,53 @@ check("日期格式非法 → None（不抛异常）",
 check("goal 缺失 → None",
       cs.race_day({"goal": {}}, today=_WEEK0), None)
 
+# ── 身体指标取数（analyze_training._fetch_body_metrics）────────────────────
+# 锁两件事：
+#   1) 「昨夜 HRV」必须取到**今天凌晨**那一夜，不能停在「上周日」——
+#      否则周一报告里表格写「昨夜 66 · 正常」、闸门写「HRV 31 · 告警」。
+#   2) 入参可能是 datetime 也可能是 date。2026-11-02 CI 实测：用 date 测通过，
+#      线上传的却是 datetime → `can't compare datetime.datetime to datetime.date`
+#      → 调用处的 try/except 把**整段 🩺 身体恢复指标**静默吞掉。
+try:
+    import types as _types
+    try:
+        import garminconnect  # noqa: F401
+    except Exception:
+        _m = _types.ModuleType("garminconnect")
+        _m.Garmin = object
+        sys.modules["garminconnect"] = _m
+    import analyze_training as _at
+
+    _T = _dtime.date.today()
+
+    class _FakeGarmin:
+        def get_user_summary(self, ds):
+            return {"restingHeartRate": 55, "sleepingSeconds": 24000}
+
+        def get_hrv_data(self, ds):
+            v = 31 if _dtime.date.fromisoformat(ds) == _T else 66
+            return {"hrvSummary": {"lastNightAvg": v, "weeklyAvg": 60,
+                                   "status": "LOW"}}
+
+        def get_body_composition(self, ds):
+            return []
+
+    for _kind, _end in (
+            ("date", _T - _dtime.timedelta(days=1)),
+            ("datetime", _dtime.datetime.combine(_T - _dtime.timedelta(days=1),
+                                                 _dtime.time()))):
+        _b = _at._fetch_body_metrics(_FakeGarmin(), _end - _dtime.timedelta(days=7), _end)
+        check(f"[{_kind}] 昨夜 HRV 取到今天凌晨", _b["hrv_last"], 31)
+        check(f"[{_kind}] hrv_last_date 是今天",
+              str(_b["hrv_last_date"]), _T.isoformat())
+        check(f"[{_kind}] 周均不被今日污染", _b["hrv_weekly"], 60)
+        check(f"[{_kind}] RHR 仍是窗口均值（未被今日污染）", _b["rhr_avg"], 55.0)
+        check(f"[{_kind}] 渲染出的 HRV 行带日期",
+              any("夜间HRV(" + _T.strftime("%m-%d") in x
+                  for x in _at._write_body_section(_b).splitlines()), True)
+except ImportError as e:  # pragma: no cover - 缺少依赖时跳过而不是误报
+    print(f"⏭️  跳过 analyze_training 渲染测试（{e}）")
+
 print("\n" + "=" * 56)
 if FAIL:
     print(f"❌ {len(FAIL)} 项失败：")

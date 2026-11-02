@@ -972,7 +972,13 @@ def _fetch_body_metrics(client, start, end):
     # 2026-11-02 实测报告表格写「昨夜 HRV 66 · 正常」，而闸门读今天凌晨
     # 写「HRV 31 · 告警」—— 同一份报告两个相反结论，读者只会怀疑工具坏了。
     # 只覆盖 lastNightAvg / status，`weeklyAvg` 仍取窗口内的值（那是「上周」的均值）。
-    _probe = end + timedelta(days=1)
+    # ⚠️ 调用方传进来的可能是 datetime 也可能是 date（`lwe` 就是 datetime）。
+    # 之前直接用 `end + timedelta(1) <= datetime.now().date()` 比较，CI 上直接
+    # 抛 `can't compare datetime.datetime to datetime.date`，而调用处是
+    # try/except → **整个 🩺 身体恢复指标章节被静默吞掉**（本地用 date 测不出来）。
+    # 这里统一归一化成 date 再比。
+    _d = lambda x: x.date() if isinstance(x, datetime) else x
+    _probe = _d(end) + timedelta(days=1)
     _today = datetime.now().date()
     while _probe <= _today:
         ds = _probe.strftime("%Y-%m-%d")
