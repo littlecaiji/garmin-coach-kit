@@ -457,6 +457,43 @@ check("未触发 → state.gate.blocked 为 False",
 check("未触发 → state.gate 原因清空（不残留上周理由）",
       _gh_off.get("gate", {}).get("reasons"), [])
 
+# ── 赛日占位（race_day）────────────────────────────────────────────────────
+# 模板只按 weekday 排课，goal_phase 只判阶段 —— 没人知道「周日那天就是比赛」。
+# 2026-11-02 实测：goal.date=2026-11-08（周日）、phase 已判 taper，课表却给
+# 周日排「力量B 精简版」、给周六排 135min 长骑。以下锁住这个判定。
+def _with_race(date_str):
+    s = base()
+    s["goal"]["date"] = date_str
+    return s
+
+
+check("赛日=本周日 → offset 6",
+      (cs.race_day(_with_race("2026-10-18"), today=_WEEK0) or {}).get("offset"), 6)
+check("赛日=本周日 → prev_offset 5（周六开腿）",
+      (cs.race_day(_with_race("2026-10-18"), today=_WEEK0) or {}).get("prev_offset"), 5)
+check("赛日=本周日 → days_to 6",
+      (cs.race_day(_with_race("2026-10-18"), today=_WEEK0) or {}).get("days_to"), 6)
+check("赛日=本周日 → date 原样回传",
+      (cs.race_day(_with_race("2026-10-18"), today=_WEEK0) or {}).get("date"),
+      "2026-10-18")
+check("赛日=今天周一 → offset 0 / days_to 0",
+      ((cs.race_day(_with_race("2026-10-12"), today=_WEEK0) or {}).get("offset"),
+       (cs.race_day(_with_race("2026-10-12"), today=_WEEK0) or {}).get("days_to")),
+      (0, 0))
+check("赛日=今天周一 → prev_offset -1（赛前一天在上周）",
+      (cs.race_day(_with_race("2026-10-12"), today=_WEEK0) or {}).get("prev_offset"),
+      -1)
+check("赛日=下周一 → 不在本周窗口，None",
+      cs.race_day(_with_race("2026-10-19"), today=_WEEK0), None)
+check("赛日=上周日（已过） → None",
+      cs.race_day(_with_race("2026-10-11"), today=_WEEK0), None)
+check("DEFAULT_STATE 的 2099 占位 → None",
+      cs.race_day(base(), today=_WEEK0), None)
+check("日期格式非法 → None（不抛异常）",
+      cs.race_day(_with_race("11/08/2026"), today=_WEEK0), None)
+check("goal 缺失 → None",
+      cs.race_day({"goal": {}}, today=_WEEK0), None)
+
 print("\n" + "=" * 56)
 if FAIL:
     print(f"❌ {len(FAIL)} 项失败：")

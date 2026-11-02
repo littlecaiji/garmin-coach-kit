@@ -919,6 +919,7 @@ def _fetch_body_metrics(client, start, end):
     Missing data stays None so the report can skip it gracefully."""
     rhr, min_hr, sleep, stress, bb_h, bb_l = [], [], [], [], [], []
     hrv_weekly = hrv_last = hrv_status = None
+    hrv_last_date = None
     weight = None
     weight_present = False
     d = start
@@ -947,6 +948,7 @@ def _fetch_body_metrics(client, start, end):
                 hrv_weekly = hsum["weeklyAvg"]
             if hsum.get("lastNightAvg") is not None:
                 hrv_last = hsum["lastNightAvg"]
+                hrv_last_date = ds
             if hsum.get("status") is not None:
                 hrv_status = hsum["status"]
         except Exception:
@@ -962,6 +964,29 @@ def _fetch_body_metrics(client, start, end):
         except Exception:
             pass
         d += timedelta(days=1)
+
+    # ── 「昨夜」单独补探窗口之后的日子（最多到今天）────────────────────────
+    # 聚合窗口是「上周 Mon–Sun」，用来算均值/睡眠/压力，语义必须保持不变。
+    # 但 `lastNightAvg` 的语义是「跑报告这一刻最近的那一夜」—— 周一早上跑时
+    # 那一夜落在**今天**凌晨，窗口里根本没有。不补探就会差一天：
+    # 2026-11-02 实测报告表格写「昨夜 HRV 66 · 正常」，而闸门读今天凌晨
+    # 写「HRV 31 · 告警」—— 同一份报告两个相反结论，读者只会怀疑工具坏了。
+    # 只覆盖 lastNightAvg / status，`weeklyAvg` 仍取窗口内的值（那是「上周」的均值）。
+    _probe = end + timedelta(days=1)
+    _today = datetime.now().date()
+    while _probe <= _today:
+        ds = _probe.strftime("%Y-%m-%d")
+        try:
+            hsum = ((client.get_hrv_data(ds) or {}).get("hrvSummary") or {})
+        except Exception:
+            break
+        if hsum.get("lastNightAvg") is not None:
+            hrv_last = hsum["lastNightAvg"]
+            hrv_last_date = ds
+            if hsum.get("status") is not None:
+                hrv_status = hsum["status"]
+        _probe += timedelta(days=1)
+
     avg = lambda x: (sum(x) / len(x)) if x else None
     return {
         "rhr_avg": avg(rhr), "rhr_min": min(rhr) if rhr else None,
@@ -970,6 +995,7 @@ def _fetch_body_metrics(client, start, end):
         "sleep_avg_min": avg(sleep), "stress_avg": avg(stress),
         "bb_high": max(bb_h) if bb_h else None, "bb_low": min(bb_l) if bb_l else None,
         "hrv_weekly": hrv_weekly, "hrv_last": hrv_last, "hrv_status": hrv_status,
+        "hrv_last_date": hrv_last_date,
         "weight": weight, "weight_present": weight_present,
     }
 
@@ -1025,8 +1051,25 @@ def _write_body_section(body):
     sl_j = ("充足(≥7h)" if sl and sl >= 420 else "偏短(<7h)" if sl else "—")
     rows.append(f"| 平均睡眠 | {f_(sl)} min | {sl_j} |")
     hrvw = body.get("hrv_weekly")
-    hrv_j = f"周均 {f_(hrvw)} ms" if hrvw else "—"
-    rows.append(f"| 夜间HRV(昨夜) | {f_(body.get('hrv_last'))} ms | {hrv_j} |")
+    hl = body.get("hrv_last")
+    _hld = str(body.get("hrv_last_date") or "")
+    # 标签必须带日期：Garmin 把一夜 HRV 记在「醒来的那天」，周一早上取值会落在
+    # 今天，而下面几行（RHR/睡眠/压力）是上周均值。笼统写「昨夜」会让人误以为
+    # 和闸门说的是同一件事，实际差了一天（见 _fetch_body_metrics 的说明）。
+    hl_lbl = f"{_hld[5:]} 晨" if len(_hld) >= 10 else "近期"
+    if hl is not None and hrvw:
+        _d = hl - hrvw
+        if _d < -5:
+            hrv_j = f"周均 {f_(hrvw)} ms · **低于周均 {abs(_d):.0f}**"
+        elif _d > 5:
+            hrv_j = f"周均 {f_(hrvw)} ms · 高于周均 {_d:.0f}"
+        else:
+            hrv_j = f"周均 {f_(hrvw)} ms · 接近"
+    elif hrvw:
+        hrv_j = f"周均 {f_(hrvw)} ms"
+    else:
+        hrv_j = "—"
+    rows.append(f"| 夜间HRV({hl_lbl}) | {f_(hl)} ms | {hrv_j} |")
     st = body.get("stress_avg")
     st_j = ("放松" if st is not None and st < 35
             else "偏高" if st and st > 50 else "正常")
@@ -1037,7 +1080,7 @@ def _write_body_section(body):
     else:
         rows.append("| 体重 | 未记录 | 手动录入引导见下方提示 |")
     out = "\n## 🩺 身体恢复指标\n\n"
-    out += "| 指标 | 上周值 | 判读 |\n|:--|:--:|:--|\n" + "\n".join(rows) + "\n"
+    out += "| 指标 | 数值 | 判读 |\n|:--|:--:|:--|\n" + "\n".join(rows) + "\n"
     if not (body.get("weight_present") and body.get("weight") is not None):
         out += ("\n> 💡 **体重待录入（你已选手动录入路线）**：在 Garmin Connect App 依次点 "
                 "「我的」→「体重」→「+ 添加」，每周称一次记录即可；录入后**下周一报告会自动显示**趋势。"
@@ -1503,6 +1546,11 @@ def _llm_context(state, lw, quality, strength_n, ctl, atl, tsb, body, heat, prev
     return ctx
 
 
+# 周一到周日 —— 下标与 `date.weekday()` / `race_day()["offset"]` 对齐。
+# 排课模板是按「周一..周日」的固定顺序拼的，用下标改行比按名字找更稳。
+WEEKDAY_CN = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+
+
 def _write_weekly_plan(ftp, tsb, strength_done, ftp_str, heat=None, state=None,
                        gate=None):
     """Emit a detailed, follow-along weekly schedule (polarized 80/20).
@@ -1518,6 +1566,10 @@ def _write_weekly_plan(ftp, tsb, strength_done, ftp_str, heat=None, state=None,
     gate = gate or {}
     blocked = bool(gate.get("blocked"))
     block_why = "；".join(gate.get("reasons") or [])
+    # 本周是否有比赛日（见 coach_state.race_day）。模板只按 weekday 排课，
+    # 不认识「周日那天就是比赛」—— 必须显式占位，否则会给赛日排力量、
+    # 给赛前一天排长骑（2026-11-02 实测）。
+    race = coach_state.race_day(st)
 
     # 功率区间一律以 state 的**校准 FTP** 为准。ftp 参数只是没有 state 时的
     # 兜底 —— 不再信任调用方传进来的值，免得又出现「调整依据表一个区间、
@@ -1564,6 +1616,15 @@ def _write_weekly_plan(ftp, tsb, strength_done, ftp_str, heat=None, state=None,
     over_cap = week_tss > tss_cap
 
     report = "\n### 🗓️ 本周建议训练安排（极化 80/20）\n\n"
+    if race:
+        _rl = WEEKDAY_CN[race["offset"]]
+        report += (
+            f"> 🏁 **本周{_rl}（{race['date']}）是比赛日 —— {race['name']}**"
+            f"，距今 {race['days_to']} 天。\n"
+            "> 赛日**不排任何训练课**（含力量）；赛前一天只做 45min Z2 开腿，"
+            "不拉长骑、不加量。\n"
+            "> 这一周的目标是「准时站上起点、腿是新鲜的」，不是补量 —— "
+            "赛前补不回来的东西，硬补只会带到赛道上。\n\n")
     if blocked:
         report += (
             "> 🔴 **自主神经闸门已触发 → 本周为「有氧恢复周」，取消全部强度课。**\n"
@@ -1611,6 +1672,13 @@ def _write_weekly_plan(ftp, tsb, strength_done, ftp_str, heat=None, state=None,
         ("周日", sun_type, sun_dur,
          "活动度/拉伸" if sp["target"] == 1 and has_a else "核心/髋外展/单腿", "0"),
     ]
+    # ── 赛日占位：在固定七行里就地改，不改顺序 ───────────────────────────
+    if race:
+        _ro, _po = race["offset"], race["prev_offset"]
+        if 0 <= _po <= 6:
+            ov[_po] = (WEEKDAY_CN[_po], "🚴 Z2 开腿（赛前唤醒）", "≈45min", z2r, "25")
+        ov[_ro] = (WEEKDAY_CN[_ro], f"🏁 比赛日 · {race['name']}",
+                   "—", "按比赛计划", "—")
     report += "| 日 | 类型 | 时长 | 主强度 | TSS |\n|:--:|:--|:--:|:--:|:--:|\n"
     for d, t, dur, intensity, tss in ov:
         report += f"| {d} | {t} | {dur} | {intensity} | {tss} |\n"
@@ -1778,6 +1846,37 @@ def _write_weekly_plan(ftp, tsb, strength_done, ftp_str, heat=None, state=None,
     sun_lines.append("**TSS≈0**。")
     details.append((sun_title, sun_lines))
 
+    # ── 赛日 / 赛前一天：覆盖上面按 weekday 生成的那两块 ──────────────────
+    # 顺序与 WEEKDAY_CN 一致（周一..周日），所以可以直接按下标替换。
+    if race:
+        _ro, _po = race["offset"], race["prev_offset"]
+        if 0 <= _po <= 6:
+            details[_po] = (f"{WEEKDAY_CN[_po]} · 🚴 Z2 开腿（赛前唤醒，不是训练）", [
+                "**目标**：把腿叫醒。**明天就是比赛，今天产生的任何疲劳都会带到赛道上。**",
+                f"**主课 45min @ {z2r}（压 Z2）**；平路，踏频 85–90rpm。",
+                "**可加 2–3×1min 快踏（110–120rpm、低功率）** 唤醒神经肌肉 —— "
+                "只提踏频不提功率，**不冲、不进 Z4**。",
+                "**红线**：腿沉 / HRV 未回升 / 静息心率仍高 → 砍到 30min，或只做 15min 活动度。"
+                "赛前少骑一天，比骑多了好。",
+                "**碳水今天就要开始补**（6–8g/kg），别指望比赛日早上补回来；"
+                "同时把车和装备全部过一遍。",
+                "**TSS≈25**。",
+            ])
+        _rd = race["days_to"]
+        details[_ro] = (f"{WEEKDAY_CN[_ro]} · 🏁 比赛日 · {race['name']}", [
+            "**今天不排训练课。** 比赛本身就是这一周唯一的「课」。",
+            f"**目标日期** `{race['date']}`（距今 {_rd} 天）；课表到这一天为止，"
+            "下一周的计划会在赛后重新按完成度生成。",
+            "**赛前 3h 吃完主餐**（高碳水、低纤维低脂）；出发前 30min 一支胶。",
+            "**前半程必须留力**：前 1/3 路段占全程约 41% 的爬升。前 70km 只在 Z2 骑，"
+            "**不跟人、不抢坡** —— 这一场的胜负在后 40km。",
+            "**补给**：每小时 60g 碳水 + 500–750ml 含钠饮料，每 45min 补一次固体；"
+            "低于这个量，200km 后半程一定崩。",
+            "**护膝**：左侧鹅足敏感 → 陡坡提前降齿比（齿比 ≥1:1），踏频守 80rpm 以上，"
+            "**一有刺痛立刻降一档**，别硬扛。",
+            "**完赛优先于成绩。** 目标是骑完，不是某个时间。",
+        ])
+
     report += "\n**每日详细（可直接照练）**\n\n"
     for title, lines in details:
         report += f"**{title}**\n"
@@ -1796,10 +1895,18 @@ def _write_weekly_plan(ftp, tsb, strength_done, ftp_str, heat=None, state=None,
                          else "力量 1 次（周日 B 精简版）不计入 TSS")
     else:
         strength_note = "力量 2 次（周五主力量A + 周日力量B）不计入 TSS"
+    if race:
+        # 上面那几句是按普通周写的，赛周得改口：长骑被 45min 开腿替换、
+        # 赛日不排力量。不重算就会在报告里留一节「根本不存在的长骑」的 TSS。
+        week_tss = week_tss - t_lng + (25 if 0 <= race["prev_offset"] <= 6 else 0)
+        strength_note = "赛周不排力量（赛日练力量毫无意义，顺延到赛后）"
     if blocked:
         dist = ("极化分布：本周**全 Z2、零强度**（自主神经闸门触发）。"
                 "周二/周四完全休息 —— 这一周的唯一 KPI 是把神经系统的账还清，"
                 "不是堆量也不是补课。")
+    elif race:
+        dist = ("极化分布：**减量周 —— 全周无质量课**，赛前一天开腿、赛日比赛。"
+                "赛前一周上强度只会消耗糖原、增加肌肉微损伤，收益为负。")
     else:
         dist = ("极化分布：Z2 为底、2 次高质量（周一阈值 + 周三间歇），Z3≈0。"
                 "周二/周四完全休息；高强度与长骑隔天安排（周三间歇 → 周六长骑中间隔周四休息+周五Z2），避免连休后集中爆发。")

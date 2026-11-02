@@ -20,6 +20,7 @@ import os
 import re
 from datetime import date as _date
 from datetime import datetime
+from datetime import timedelta
 
 # ── 数据目录（state 属于个人健康数据，与代码物理分离）─────────────────────
 # 解析顺序（第一条命中即用）：
@@ -651,6 +652,52 @@ def week_key(dt):
     """ISO 年-周（如 2026-W42）—— 用于「同一周只推进一次」的幂等保护。"""
     iso = dt.isocalendar()
     return f"{iso[0]}-W{iso[1]:02d}"
+
+
+def race_day(state, today=None):
+    """本周（周一–周日）里是否有目标比赛日；有则返回占位信息，否则 None。
+
+    为什么需要它：排课模板只按 weekday 套结构，`goal_phase()` 只判阶段，
+    **没人知道「周日那天就是比赛」**。2026-11-02 实测踩到：`goal.date=2026-11-08`
+    是周日、phase 已判 taper，可课表给周日排了「力量B 精简版」、给周六排了
+    135min 长骑 —— 赛前一天拉长骑、比赛当天练力量。阶段判断管不了日期占位，
+    所以必须有一个显式的「赛日」查询。
+
+    返回 dict 字段：
+      offset      距本周一的天数（0=周一 … 6=周日），与 weekday 对齐
+      date        比赛日 YYYY-MM-DD
+      days_to     距今天还有几天（0 = 今天就是比赛日）
+      prev_offset 赛前一天在本周内的 offset；赛日就是周一时为 -1（上周日）
+      name        目标名称
+
+    只认「本周之内、且尚未过去」的比赛日。远期占位（>=2099）视为无目标，
+    免得 DEFAULT_STATE 的占位日期把示例课表排成「每天都是比赛」。
+    """
+    g = state.get("goal") or {}
+    raw = str(g.get("date") or "").strip()
+    if not raw:
+        return None
+    try:
+        rd = datetime.strptime(raw, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+    if rd.year >= 2099:            # DEFAULT_STATE / 示例配置的远期占位
+        return None
+    t = (today or datetime.now()).date()
+    days_to = (rd - t).days
+    if days_to < 0:                # 本周早些时候已经比完了，不是「即将到来」
+        return None
+    mon = t - timedelta(days=t.weekday())
+    off = (rd - mon).days
+    if not (0 <= off <= 6):        # 比赛日不在本周窗口内
+        return None
+    return {
+        "offset": off,
+        "prev_offset": off - 1,
+        "date": rd.strftime("%Y-%m-%d"),
+        "days_to": days_to,
+        "name": g.get("name") or "目标比赛",
+    }
 
 
 def advance(state, compliance, tsb, today=None, gate=None):

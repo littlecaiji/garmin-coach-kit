@@ -519,6 +519,44 @@ def build_plan(ftp, hot=False, state=None):
             6, d(6),
             _workout(sun_name, sun_desc, STRENGTH, warm_B + sB_steps + stretch_B, 2160),
         ))
+    # ── 赛日占位：赛日不推任何课（含力量）；赛前一天把长骑换成 45min 开腿 ──
+    # 报告里说的必须和手表上推的一致（2026-10-12 / 10-19 两次教训）：只在报告层
+    # 兜底会变成「报告写比赛日、手表推力量B」。所以这里也读同一个 race_day()。
+    _race = coach_state.race_day(st)
+    if _race:
+        _ro, _po = _race["offset"], _race["prev_offset"]
+        plan = [p for p in plan if p[0] != _ro]
+        if 0 <= _po <= 6:
+            plan = [p for p in plan if p[0] != _po]
+            plan.append((
+                _po, d(_po),
+                _workout(
+                    f"{NAME_PREFIX}·赛前开腿",
+                    f"赛前：热身10min + 30min @{z2r_lo}-{z2r_hi}W（压Z2，只叫醒不训练）"
+                    f" + 3×1min 快踏 110-120rpm（功率守 Z1，别加瓦） + 放松5min；"
+                    f"明天比赛，今天不制造疲劳",
+                    CYCLING,
+                    [
+                        _step(1, 600, "warmup", 1, POWER, float(z1_lo), float(z1_hi),
+                              desc=f"热身 Z1 {z1_lo}-{z1_hi}W"),
+                        _step(2, 1800, "main", 8, POWER, float(z2r_lo), float(z2r_hi),
+                              desc=f"Z2 {z2r_lo}-{z2r_hi}W（压住，不冲）"),
+                        _repeat(3, 3, [
+                            _step(1, 60, "interval", 8, POWER,
+                                  float(z1_lo), float(z1_hi),
+                                  desc="快踏 110-120rpm（功率守 Z1，只提踏频）"),
+                            _step(2, 60, "recovery", 4, POWER,
+                                  float(z1_lo), float(z1_hi),
+                                  desc=f"组间 Z1 {z1_lo}-{z1_hi}W"),
+                        ]),
+                        _step(6, 300, "cooldown", 2, POWER,
+                              float(z1_lo), float(z1_hi),
+                              desc=f"放松 Z1 {z1_lo}-{z1_hi}W"),
+                    ],
+                    2700,
+                ),
+            ))
+        plan.sort(key=lambda p: p[0])
     return plan
 
 
