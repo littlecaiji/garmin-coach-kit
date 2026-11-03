@@ -70,7 +70,17 @@ QUALITY_LADDERS = {
 }
 
 # 长骑时长按目标阶段封顶（分钟）。基准值只随「真的完成了长骑」向上爬。
-PHASE_LONG_CAP = {"base": 180, "build": 240, "peak": 300, "taper": 150, "post": 150}
+#
+# 2026-11-03 上调：base 180→330、build 240→330、peak 300→360。
+# 原来 base 封顶 180min（3h）是为「周末挤不出整天」的情况设的，但实际约束是
+# **周末固定能骑 5–6h**（11/1 一次 415min/165km 已验证）。旧上限会让冬训计划里
+# 写的「周六 4–5.5h」在系统里变成 3h —— 报告与计划对不上，正是最该避免的那类
+# 「说一套推一套」。上限只是天花板，不会强制变长：基准仍按 +30min/2 周往上爬。
+PHASE_LONG_CAP = {"base": 330, "build": 330, "peak": 360, "taper": 150, "post": 150}
+
+# 长骑基准的硬天花板（分钟）。+30min / 2 周往上爬，爬到这儿就停 —— 6h 是
+# 单日训练的实际上限，再长就开始影响恢复和下一次质量课，收益转负。
+LONG_RIDE_HARD_CAP = 360
 
 # ── 力量课的三种档位 ──────────────────────────────────────────────────────
 # 每个档位包含「一周要几次」和「用哪套动作表」两件事：
@@ -612,9 +622,9 @@ def _advance_endurance(state, long_km, long_min, planned_min, log):
     ratio = long_min / planned_min if planned_min else 0
     if ratio >= 0.9:
         e["consecutive_long_ok"] += 1
-        if e["consecutive_long_ok"] >= 2 and e["long_ride_min"] < 240:
+        if e["consecutive_long_ok"] >= 2 and e["long_ride_min"] < LONG_RIDE_HARD_CAP:
             old = e["long_ride_min"]
-            e["long_ride_min"] = min(old + 30, 240)
+            e["long_ride_min"] = min(old + 30, LONG_RIDE_HARD_CAP)
             e["consecutive_long_ok"] = 0
             log.append(f"📈 长骑连续两周达标 → 基准 {old}min → "
                        f"**{e['long_ride_min']}min**（{long_km:.0f}km 起步，先加时长不加强度）")

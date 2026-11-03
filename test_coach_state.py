@@ -541,6 +541,21 @@ try:
 except ImportError as e:  # pragma: no cover - 缺少依赖时跳过而不是误报
     print(f"⏭️  跳过 analyze_training 渲染测试（{e}）")
 
+# ── 长骑上限（2026-11-03 上调）────────────────────────────────────────────
+# 旧上限 base=180min，会把「周末固定 5–6h 长骑」在系统里压成 3h —— 计划说 5h、
+# 报告排 3h，正是最该避免的「说一套推一套」。这里锁住新上限。
+_lr = base()
+_lr["endurance"]["long_ride_min"] = 330
+check("base 阶段长骑 330min 不再被压在 180",
+      cs.planned_long_ride_min(_lr, "base"), 330)
+_lr["endurance"]["long_ride_min"] = 999
+check("长骑时长不超过 base 阶段上限 330",
+      cs.planned_long_ride_min(_lr, "base"), 330)
+check("peak 阶段上限 360（6h 硬顶）",
+      cs.planned_long_ride_min(_lr, "peak"), 360)
+check("taper 阶段仍压到 150（减量不可突破）",
+      cs.planned_long_ride_min(_lr, "taper"), 150)
+
 print("\n" + "=" * 56)
 if FAIL:
     print(f"❌ {len(FAIL)} 项失败：")
