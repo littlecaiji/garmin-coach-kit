@@ -10,6 +10,10 @@ on:
         description: "只演练不真的推课表（push_plan_to_connect.py --dry-run）"
         type: boolean
         default: false
+      force:
+        description: "强制重跑：忽略「本周已跑过」的幂等闸门（用于改参后重新出报告/重推课表）"
+        type: boolean
+        default: false
   push:                     # 代码更新后自动跑一次验证（只验报告链路，不动 Garmin 课表）
     branches: [main]
 
@@ -88,7 +92,7 @@ jobs:
           WEEK=$(python3 -c "import datetime;from zoneinfo import ZoneInfo;i=datetime.datetime.now(ZoneInfo('Asia/Shanghai')).isocalendar();print(f'{i[0]}-W{i[1]:02d}')")
           DONE=$(python3 -c "import json;print(json.load(open('$DATA_DIR/state/training_state.json')).get('last_advanced_week') or '')")
           echo "本周=$WEEK  state.last_advanced_week=${DONE:-（空）}"
-          if [ "$DONE" = "$WEEK" ]; then
+          if [ "$DONE" = "$WEEK" ] && [ "${{ inputs.force }}" != "true" ]; then
             echo "ran=true" >> "$GITHUB_OUTPUT"
             echo "::notice::本周（$WEEK）的周报已经生成过 —— 跳过，避免重复推送"
           else

@@ -1651,8 +1651,11 @@ def _write_weekly_plan(ftp, tsb, strength_done, ftp_str, heat=None, state=None,
     # mode 字符串 —— single 档下周日是没有力量课的，光判 minimal 会漏。
     has_a, has_b = bool(sp["A"]), bool(sp["B"])
     if sp["mode"] == "minimal":
-        fri_type, sun_type = "🚴 Z2 恢复骑", "🏋️ 力量B 精简版（单次）"
-        sun_dur = "20–25min"
+        # 11/9 起 B 精简版放**周五骑后**，周日恢复全休。冬训骨架本来就是
+        # 「周五轻松+力量B、周日全休」；排周日会吃掉唯一的休息日，且是在长骑后练腿。
+        # B 只有核心/髋外展/单腿 20–25min，不压腿，不影响次日长骑。
+        fri_type, sun_type = "🚴 Z2 恢复骑 + 🏋️ 力量B 精简版（单次）", "🧘 休息"
+        sun_dur = "—"
     elif has_b:
         fri_type, sun_type = "🚴 Z2 恢复骑 + 🏋️力量A", "🏋️ 力量B + 轻量核心"
         sun_dur = "30–40min"
@@ -1672,11 +1675,12 @@ def _write_weekly_plan(ftp, tsb, strength_done, ftp_str, heat=None, state=None,
         ("周二", "🧘 休息", "—", "完全休息/散步", "0"),
         wed_row,
         ("周四", "🧘 休息", "—", "完全休息/散步", "0"),
-        ("周五", fri_type, "≈95min" if has_a else "≈85min",
-         z2r, f"{t_z2:.0f}"),
+        ("周五", fri_type, "≈105min" if has_a or sp["mode"] == "minimal"
+         else "≈85min", z2r, f"{t_z2:.0f}"),
         ("周六", sat_type, long_dur, lng, f"{t_lng:.0f}"),
         ("周日", sun_type, sun_dur,
-         "活动度/拉伸" if sp["target"] == 1 and has_a else "核心/髋外展/单腿", "0"),
+         "—" if sp["mode"] == "minimal" else
+         ("活动度/拉伸" if sp["target"] == 1 and has_a else "核心/髋外展/单腿"), "0"),
     ]
     # ── 赛日占位：在固定七行里就地改，不改顺序 ───────────────────────────
     if race:
@@ -1757,13 +1761,17 @@ def _write_weekly_plan(ftp, tsb, strength_done, ftp_str, heat=None, state=None,
     if has_a:
         fri_lines.insert(0, "**目标**：有氧积累（Z2）+ 本周力量主课。力量重心按 fitting（9/27）结论排布：**臀大肌 + 髂腰肌 + 核心**，治骨盆后倾→腰酸的本，兼补左腿偏弱（48%）。")
     else:
-        fri_lines.insert(0, "**目标**：有氧积累（Z2）。周五不安排力量 —— 本周那一次放在周日（见下）。")
+        fri_lines.insert(0, "**目标**：有氧积累（Z2）+ 本周力量（B 精简版，骑后接做）。"
+                            "B 只有 20–25min 核心/髋外展/单腿，不压腿，不影响周六长骑。")
     fri_lines.append(
         f"**主课 60–90min @ {z2r}（压 Z2）**，平路/缓坡，避大起伏；踏频 85–90rpm（室内尤其提到 80+）。")
     if not has_a:
         fri_lines.append(
             f"**力量本周降级**：上周为 0 次（连续 {st['strength']['consecutive_missed']} 周），"
-            f"不安排力量A —— 本周只求完成周日那一次精简版，先把习惯接回来。")
+            f"不安排力量A —— 骑完接做那一次 B 精简版，先把习惯接回来。")
+        fri_lines.append(
+            f"**接力量B（20–25min，骑后做，组间休 60–90s）**："
+            f"{coach_state.describe_movements(sp['B'])}。")
     else:
         fri_lines += [
             f"**接力量A（{'主' if has_b else '本周唯一力量课'}，40–50min，组间休 60–90s）**："
@@ -1820,18 +1828,15 @@ def _write_weekly_plan(ftp, tsb, strength_done, ftp_str, heat=None, state=None,
 
     # 周日：minimal → B 精简版（本周唯一）；full → 力量B；single → 无力量课
     if sp["mode"] == "minimal":
-        sun_title = "周日 · 🏋️ 力量B 精简版（本周唯一力量课）"
+        # B 精简版已挪到周五骑后，周日恢复真正的全休（冬训骨架）。
+        sun_title = "周日 · 🧘 完全休息"
         sun_lines = [
-            f"**目标**：力量已连续 {st['strength']['consecutive_missed']} 周为空。"
-            f"本周不追负荷，**目标只有一个：做一次**。",
-            f"**主课（20–25min）**：{coach_state.describe_movements(sp['B'])}。",
-            "**做完即达标** —— 完成这件事本身就是本周的胜利，重量轻无所谓。",
-            "**活动度**：髋屈肌/股四/腘绳拉伸 + **鹅足部位按摩球放松**（左膝内侧），每处 60s。",
+            "**目标**：本周唯一的全休日 —— 长骑后的恢复本身就是训练的一部分，"
+            "不要用「补量」把它填掉。",
+            "**内容**：完全休息；或 20–30min 轻松散步 + 髋屈肌/股四/腘绳/腓肠拉伸各 60s。",
+            "**鹅足部位按摩球放松**（左膝内侧）60s —— fitting 的 P0 项，不花时间，但不做等于白调。",
+            "**若周五力量没做**：周日就是补做窗口，照周五那段「力量B 精简版」练，别顺延到下周。",
         ]
-        if blocked:
-            sun_lines.append(
-                "🔴 **闸门触发期间**：就这 20–25min，不加动作、不加重量；"
-                "当天静息心率仍高或身体有异样 → 只做拉伸。")
     elif has_b:
         sun_title = "周日 · 🏋️ 力量B + 轻量核心"
         sun_lines = [

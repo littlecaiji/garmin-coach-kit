@@ -424,7 +424,7 @@ def build_plan(ftp, hot=False, state=None):
             f"{NAME_PREFIX}·Z2恢复骑",
             f"周五：热身10min + 60-90min @{z2r_lo}-{z2r_hi}W（死守Z2，踏频85-90） + 放松10min"
             + ("；课后接力量A" if _has_a
-               else "（本周力量在周日 · B 精简版）"),
+               else "；骑后接力量B（精简版 20-25min）"),
             CYCLING,
             [
                 _step(1, 360, "warmup", 1, POWER, float(z1_lo), float(z1_hi),
@@ -455,6 +455,27 @@ def build_plan(ftp, hot=False, state=None):
                 STRENGTH,
                 warm_A + sA_steps + stretch_A,
                 2700,
+            ),
+        ))
+
+    # minimal 档：B 精简版放**周五骑后**，不再排周日。
+    # 依据冬训骨架「周一力量 → 周三质量 → 周五轻松+力量B → 周六长骑 → 周日全休」：
+    # 排周日会吃掉唯一的全休日，而且是在 3h 长骑之后练腿。B 只有核心/髋外展/单腿
+    # 20-25min，不压腿，不影响周六长骑 —— 那句「力量不能放周五」针对的是力量A。
+    if sp["mode"] == "minimal" and _has_b:
+        warm_B, after_warm_B = _warmup_steps(1, STRENGTH_WARMUP_B)
+        sB_steps, next_order_b = _strength_steps(after_warm_B, sp["B"])
+        stretch_B, _ = _stretch_steps(next_order_b, POST_RIDE_STRETCHES)
+        plan.append((
+            4, d(4),
+            _workout(
+                f"{NAME_PREFIX}·力量训练B（精简版·本周唯一力量课）",
+                "周五（精简版，20-25min，骑后接做）：只求完成一次 → "
+                + coach_state.describe_movements(sp["B"]).replace("**", "")
+                + "；重量轻无所谓，做完即达标",
+                STRENGTH,
+                warm_B + sB_steps + stretch_B,
+                2160,
             ),
         ))
 
@@ -498,9 +519,10 @@ def build_plan(ftp, hot=False, state=None):
         ),
     ))
 
-    # Sun: strength B（full 档）或 B 精简版（minimal 档）；single 档本周只有周五
-    # 那一次力量，周日不推任何课 —— 推一节空课/重复课只会让日历变噪音。
-    if _has_b:
+    # Sun: strength B（仅 full 档）；single 档本周只有周五那一次力量，
+    # minimal 档的 B 精简版已挪到周五骑后（11/9 改）—— 周日一律不推课，
+    # 推一节空课/重复课只会让日历变噪音。
+    if _has_b and sp["mode"] != "minimal":
         warm_B, after_warm_B = _warmup_steps(1, STRENGTH_WARMUP_B)
         sB_steps, next_order_b = _strength_steps(after_warm_B, sp["B"])
         stretch_B, _ = _stretch_steps(next_order_b, POST_RIDE_STRETCHES)
@@ -779,7 +801,7 @@ def main():
         _strength_days = {
             "full": "周五Z2+力量A / 周日力量B",
             "single": "周五Z2+力量A（本周唯一力量课）",
-            "minimal": "周五Z2 / 周日力量B精简版",
+            "minimal": "周五Z2+力量B精简版 / 周日全休",
         }.get(state["strength"]["mode"], "周五Z2+力量A / 周日力量B")
         _quality_days = ("周一Z2有氧 / 周三Z2有氧（闸门触发·强度课已取消）"
                          if _gated_now else "周一阈值 / 周三VO2max")
