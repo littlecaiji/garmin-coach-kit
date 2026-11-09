@@ -1903,7 +1903,7 @@ def _write_weekly_plan(ftp, tsb, strength_done, ftp_str, heat=None, state=None,
         cap_note = f"（已超阶段上限 {tss_cap}，如体感吃紧优先砍周五 Z2）"
     if sp["target"] == 1:
         strength_note = ("力量 1 次（周五主课力量A）不计入 TSS" if has_a
-                         else "力量 1 次（周日 B 精简版）不计入 TSS")
+                         else "力量 1 次（周五骑后 B 精简版）不计入 TSS")
     else:
         strength_note = "力量 2 次（周五主力量A + 周日力量B）不计入 TSS"
     if race:
