@@ -1416,8 +1416,9 @@ def _write_state_section(state, decisions):
             f"| 连续满组 {state['quality']['threshold']['consecutive_ok']} 周 |\n")
     out += (f"| VO2max | {vo2_s}×{vo2_r}min @{_pz(st_ftp, 110, 118)} "
             f"| 连续满组 {state['quality']['vo2']['consecutive_ok']} 周 |\n")
+    _eff_mode = coach_state.strength_plan(state)["mode"]
     _mode_label = {"full": "完整 A+B（2 次/周）", "single": "单次主课力量A（1 次/周）",
-                   "minimal": "B 精简版单次（1 次/周）"}.get(s.get("mode"), s.get("mode"))
+                   "minimal": "B 精简版单次（1 次/周）"}.get(_eff_mode, _eff_mode)
     out += (f"| 力量模式 | {_mode_label} "
             f"| 断档 {s['consecutive_missed']} 周 / 连续完成 {s['consecutive_done']} 周 |\n")
     out += (f"| 长骑基准 | {e['long_ride_min']}min "

@@ -393,17 +393,20 @@ check("只缺 1 周不算断档（可能是漏记）", cs.readiness_gaps(_1miss,
 
 # ══ §19 三档位的力量课表形状 ═════════════════════════════════════════════════
 print("\n── 19. 三档位的力量课表形状 ──")
-_fp = cs.strength_plan(copy.deepcopy(cs.DEFAULT_STATE))
+# 本节验的是「mode → 动作表形状」这层纯映射，不是日历。冬训阶段表（11/17 起）
+# 会按日期覆盖 mode，所以这里固定传一个阶段表之外的日期，避免测试随真实日期漂移。
+_PRE_WINTER = _dtime.date(2026, 10, 1)
+_fp = cs.strength_plan(copy.deepcopy(cs.DEFAULT_STATE), _PRE_WINTER)
 check("full：A+B 都在，目标 2 次",
       (bool(_fp["A"]), bool(_fp["B"]), _fp["target"]), (True, True, 2))
 _ss = copy.deepcopy(cs.DEFAULT_STATE)
 _ss["strength"]["mode"] = "single"
-_sp2 = cs.strength_plan(_ss)
+_sp2 = cs.strength_plan(_ss, _PRE_WINTER)
 check("single：只有主课 A，目标 1 次",
       (bool(_sp2["A"]), bool(_sp2["B"]), _sp2["target"]), (True, False, 1))
 _mm = copy.deepcopy(cs.DEFAULT_STATE)
 _mm["strength"]["mode"] = "minimal"
-_mp2 = cs.strength_plan(_mm)
+_mp2 = cs.strength_plan(_mm, _PRE_WINTER)
 check("minimal：只有 B 精简版，目标 1 次",
       (bool(_mp2["A"]), bool(_mp2["B"]), _mp2["target"]), (False, True, 1))
 check("single 的主课含保加利亚分腿蹲（用户实际在练的动作）",

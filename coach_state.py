@@ -101,6 +101,45 @@ PHASE_LABEL = {
     "taper": "减量期", "post": "目标已完成",
 }
 
+# ── 冬训阶段表（2026-11-17 → 2027-03-31）──────────────────────────────────
+# 原《冬训计划》21 周是按「11/8 打完 200km/3500m」写的；那场因为下雨没跑，
+# 「阶段 0 赛后恢复 / 还债」的前提不存在，11/9 已作废。这张表是**按真实进度
+# 重排的执行表**，依据是：力量连续 4 周 0 次、长骑连续 2 周卡在 ~90min、
+# 但质量课执行质量很高（阈值 3×12 全组 98–99% FTP、VO2 5×5… 全组 114–115%）。
+#
+# 三条设计原则：
+#   1. 力量从 0 起跑 —— 先用 3 周把「每周 1 次」做成事实，再谈 2 次/周；
+#      且升档还要过一道闸：**上周真的做过**（见 strength_plan 里的 gate）。
+#   2. 长骑的阶段值只是「目的地」，单周最多比当前基准多 60min —— 不跳级。
+#   3. 低踏频扭矩课留到阶段 2（1 月）：它服务于爬坡专项，那时力量已稳定，
+#      现在加进去只会和「把力量做成习惯」抢恢复。阶段 1 用阈值/VO2 维持强度。
+# 字段：(起, 止, 名称, 力量档位, 长骑目标min, 是否减量阶段)，日期含首尾。
+WINTER_STAGES = [
+    ("2026-11-17", "2026-12-06", "巩固期",        "minimal", 180, False),
+    ("2026-12-07", "2027-01-03", "力量重建",      "full",    240, False),
+    ("2027-01-04", "2027-02-07", "力量峰值+爬坡", "full",    270, False),
+    ("2027-02-08", "2027-03-14", "构建",          "single",  300, False),
+    ("2027-03-15", "2027-03-31", "检验",          "single",  180, True),
+]
+
+WINTER_LONG_STEP = 60      # 长骑单周最多比基准多这么多分钟（防跳级）
+
+
+def winter_stage(today=None):
+    """当前所处的冬训阶段；不在表内返回 None（不干预）。
+
+    trim=True 表示「减量阶段」：长骑目标可以**强制压低**。
+    其余阶段只做「天花板」，不会把已经爬得更高的基准砍下来。
+    """
+    today = today or datetime.now()
+    d = today.date() if hasattr(today, "date") else today
+    for s, e, name, mode, lng, trim in WINTER_STAGES:
+        if datetime.strptime(s, "%Y-%m-%d").date() <= d <= \
+                datetime.strptime(e, "%Y-%m-%d").date():
+            return {"name": name, "strength_mode": mode, "long_min": lng,
+                    "trim": trim, "start": s, "end": e}
+    return None
+
 # 周骑行 TSS 上限：平时 330，进入 11 月挑战专项期放宽到 450
 TSS_CAP_DEFAULT = 330
 TSS_CAP_CHALLENGE = 450
@@ -349,10 +388,24 @@ def goal_phase(state, today=None):
     return "taper"
 
 
-def planned_long_ride_min(state, phase):
-    """本周六长骑的目标时长（分钟）——受阶段上限约束。"""
+def planned_long_ride_min(state, phase, today=None):
+    """本周六长骑的目标时长（分钟）——受阶段上限约束。
+
+    冬训阶段表给的是「目的地」，不是「本周就跳过去」：单周最多比当前基准
+    多 WINTER_LONG_STEP 分钟。基准本身由完成度推进（`_advance_endurance`），
+    所以「连续两周没骑成长骑」时，基准不动，处方也不会一路飙上去。
+    减量阶段（检验期）目标低于基准时直接压下来 —— 减量不可商量。
+    """
     base = int(state["endurance"]["long_ride_min"])
     cap = PHASE_LONG_CAP.get(phase, 180)
+    stage = winter_stage(today)
+    if stage:
+        target = int(stage["long_min"])
+        if stage["trim"]:
+            # 检验期：减量不可商量，直接压到目标（仍受 taper 上限约束）
+            return max(60, min(target, cap))
+        # 其余阶段：目标只是天花板。已经骑得更高就保留，单周最多 +STEP。
+        return min(cap, max(base, min(target, base + WINTER_LONG_STEP)))
     return min(base, cap)
 
 
@@ -934,7 +987,7 @@ def _fill_kg(movements, weights):
     return out
 
 
-def strength_plan(state):
+def strength_plan(state, today=None):
     """本周实际要做的力量课。
 
     返回 {"mode", "target", "A", "B"}：
@@ -942,12 +995,26 @@ def strength_plan(state):
       * A/B = 各自的动作表；某套为空表示本周不做那一套
         - full    → A（周五主）+ B（周日辅）
         - single  → 只有 A（周五），周日改为休息/活动度
-        - minimal → 只有 B 精简版（周日）
+        - minimal → 只有 B 精简版（周五骑后）
     调用方请以「A / B 是否为空」判断有没有那节课，不要再去比 mode 字符串 ——
     三种档位下 "== 'minimal'" 这种判断已经不够用了。
+
+    ⚠️ 冬训阶段表会**提议**档位（WINTER_STAGES），但提议不等于拍板：
+    想升到 2 次/周（full），必须满足「上周真的做过一次」（consecutive_missed == 0）。
+    这条闸门是对原来那条「力量档位只能人手改」的替代 —— 用户 11/17 明确要求
+    「按训练进度自动安排」，所以让日历提议、让完成事实拍板。
+    力量仍为 0 时，再怎么到日期也只会保持当前档位，不会凭空加到 2 次/周。
     """
     w = state["strength"]["weights"]
     mode = state["strength"].get("mode") or "full"
+    stage = winter_stage(today)
+    if stage:
+        want = stage["strength_mode"]
+        missed = int(state["strength"].get("consecutive_missed") or 0)
+        if want == "full" and missed > 0:
+            # 上周没做 → 不升档，退回当前档位（minimal 还是 minimal，single 还是 single）
+            want = "minimal" if mode == "minimal" else "single"
+        mode = want
     if mode == "minimal":
         return {"mode": "minimal", "target": 1,
                 "A": [], "B": _fill_kg(STRENGTH_B_MIN, w)}

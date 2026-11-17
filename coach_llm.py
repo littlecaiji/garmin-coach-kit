@@ -101,6 +101,21 @@ SYSTEM_PROMPT = """你是一位经验丰富的自行车耐力教练，正在给�
 5. 不要复述整张表，只挑最值得注意的。"""
 
 
+def _eff_strength_mode(state):
+    """报告里展示的力量档位 = 实际会执行的那一档。
+
+    冬训阶段表（`coach_state.WINTER_STAGES`）会在 `strength_plan()` 里覆盖
+    state 里存着的 mode，所以这里不能再直接读 `state["strength"]["mode"]`，
+    否则模型会照着旧档位写「本周 1 次」，而课表其实排了 2 次。
+    延迟导入是为了保持本模块对 coach_state 的弱依赖（它也确实是可选层）。
+    """
+    try:
+        import coach_state
+        return coach_state.strength_plan(state)["mode"]
+    except Exception:
+        return state["strength"]["mode"]
+
+
 def _api_key():
     return (os.environ.get("LLM_API_KEY") or "").strip()
 
@@ -128,10 +143,10 @@ def build_payload(state, context, model, stream=False):
                       f"{state['quality']['threshold']['reps']}min",
             "VO2max课": f"{state['quality']['vo2']['sets']}×"
                         f"{state['quality']['vo2']['reps']}min",
-            "力量模式": state["strength"]["mode"],
+            "力量模式": _eff_strength_mode(state),
             "力量连续断档周数": state["strength"]["consecutive_missed"],
             "负重kg": state["strength"]["weights"],
-            "长骑基准min": state["endurance"]["long_ride_min"],
+            "长骑基准min": int(state["endurance"]["long_ride_min"]),
             "周TSS上限": context.get("tss_cap"),
             "本周周TSS估算": context.get("week_tss"),
         },

@@ -648,7 +648,7 @@ def main():
         _gate.get("week") == coach_state.week_key(datetime.now())
     print(f"ℹ️ 状态：阶段={coach_state.PHASE_LABEL.get(phase, phase)} · "
           f"{'🔴 闸门触发→全 Z2' if _gated_now else f'阈值课 {thr_sets}×{thr_reps}min'} · "
-          f"力量模式={state['strength']['mode']} · "
+          f"力量模式={coach_state.strength_plan(state)['mode']} · "
           f"长骑 {coach_state.planned_long_ride_min(state, phase)}min"
           f"/{state['goal'].get('long_ride_variant', 'z2')}")
 
@@ -802,7 +802,7 @@ def main():
             "full": "周五Z2+力量A / 周日力量B",
             "single": "周五Z2+力量A（本周唯一力量课）",
             "minimal": "周五Z2+力量B精简版 / 周日全休",
-        }.get(state["strength"]["mode"], "周五Z2+力量A / 周日力量B")
+        }.get(coach_state.strength_plan(state)["mode"], "周五Z2+力量A / 周日力量B")
         _quality_days = ("周一Z2有氧 / 周三Z2有氧（闸门触发·强度课已取消）"
                          if _gated_now else "周一阈值 / 周三VO2max")
         print(f"\n🎉 课表已按极化布局推送（周二/周四休息）："
