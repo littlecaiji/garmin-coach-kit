@@ -1822,7 +1822,7 @@ def _write_weekly_plan(ftp, tsb, strength_done, ftp_str, heat=None, state=None,
         "**心率**：作安全上限，>160 降一点功率，但底线不低于 Z2 功率下限（勿为压心率把功率降到恢复区）。",
         "**补给**：每小时 500–750ml + 电解质；每 45–60min 少量碳水（能量胶/香蕉）。",
         f"**TSS≈{t_lng:.0f}**。" + ("次日（周日）安排轻量力量/核心，长骑后避免高强度课。"
-                                 if has_b else
+                                 if sp["mode"] == "full" else
                                  "长骑后次日不安排任何训练 —— 本周力量已放在周五，周日留给恢复。"),
     ]
     details.append(("周六 · 🚴 长距离耐力（死守 Z2）", lng_lines))
