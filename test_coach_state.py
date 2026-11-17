@@ -261,14 +261,35 @@ check("闸门：HRV 低于平衡区下限一档 → 拦",
 check("闸门：只有 status=LOW、没有数值 → 也拦",
       gate(None, "LOW", [50, 50])["blocked"], True)
 
-# RHR 两条判据：连续上升 / 相对近期最低值的抬升
+# RHR 两条判据：连续上升 / 相对中位数的急性尖峰 / 整段抬高
 check("闸门：RHR 连续上升 2 天 → 不拦（未到 3 天）",
       gate(70, "BALANCED", [50, 51, 52])["blocked"], False)
 check("闸门：RHR 连续上升 3 天 → 拦",
       gate(70, "BALANCED", [50, 51, 52, 53])["blocked"], True)
-check("闸门：RHR 抬高 5 bpm（非连续）→ 拦",
+
+# 2026-11-17 真实数据：中位 55、最新 57、最低 51。
+# 旧判据（vs 最低值 ≥5）会把整周强度砍掉，但当天 HRV 65 正常、TSB 仅 −1，
+# 且前一晚刚完成阈值 3×12 —— 这是「单夜波动」，不是异常。必须放行。
+check("闸门：RHR 57 但中位 55（单夜波动）→ 放行（11/17 真实数据）",
+      gate(70, "BALANCED", [51, 55, 54, 56, 53, 55, 55, 57])["blocked"], False)
+# 真正的急性尖峰：平稳 50–52 之后突然 58，中位仍 51 → 必须拦
+_g_spike = gate(70, "BALANCED", [50, 51, 52, 51, 50, 51, 58])
+check("闸门：RHR 从中位 51 尖到 58 → 拦（急性尖峰）", _g_spike["blocked"], True)
+check("闸门：急性尖峰的理由对标中位数",
+      any("中位 51" in r for r in _g_spike["reasons"]), True)
+# 整段抬高（10/12 的形状）：中位跟着一起漂，只有挨着最低值才看得出来
+_g_shift = gate(70, "BALANCED", [50, 55, 53, 56, 57, 58, 58, 59])
+check("闸门：RHR 整段抬高 9bpm（中位只差 2.5）→ 拦", _g_shift["blocked"], True)
+check("闸门：整体抬高时理由点明「非单夜波动」",
+      any("整段抬高" in r for r in _g_shift["reasons"]), True)
+# 抬高 6bpm 但中位只动 4 —— 低于「整体抬高」门槛 8，不算异常
+check("闸门：RHR 比最低值高 6 但中位只差 4 → 放行",
+      gate(70, "BALANCED", [51, 53, 53, 53, 57])["blocked"], False)
+
+# 样本不足 3 天时中位数无意义，退回原判据（保守）
+check("闸门：RHR 抬高 5 bpm、样本仅 2 天 → 拦（保守兜底）",
       gate(70, "BALANCED", [50, 55])["blocked"], True)
-check("闸门：RHR 抬高 4 bpm → 不拦",
+check("闸门：RHR 抬高 4 bpm、样本仅 2 天 → 不拦",
       gate(70, "BALANCED", [50, 54])["blocked"], False)
 
 # 缺数据绝不能当成「异常」—— Garmin 抽风那天不该平白取消整周训练

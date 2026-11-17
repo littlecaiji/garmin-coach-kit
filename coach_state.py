@@ -18,6 +18,7 @@ import copy
 import json
 import os
 import re
+import statistics
 from datetime import date as _date
 from datetime import datetime
 from datetime import timedelta
@@ -447,8 +448,20 @@ def readiness_gaps(state, tsb):
 # 反向也成立：TSB 为负但 HRV 正常 = 正常训练疲劳，不必恐慌 —— 所以闸门只在
 # 自主神经一侧异常时触发，不做「TSB 低就一起拦」的粗暴处理。
 HRV_FALLBACK_LOW = 60.0     # 拿不到 Garmin baseline 时的兜底告警线
-RHR_ELEVATION_BPM = 5.0     # 静息心率高于近期最低值多少算异常抬升
-RHR_RISE_DAYS = 3           # 连续上升多少天算异常
+# RHR 用两条互补判据，因为「最新一晚偏高」和「整段都抬高了」是两件事：
+#   ① 急性尖峰 —— 最新值比**窗口中位数**高 RHR_ELEVATION_BPM。中位数是稳健的
+#      中心趋势，单夜波动动不了它，所以这条几乎不会误报。
+#   ② 整体抬高 —— 最新值比**窗口最低值**高 RHR_SHIFT_BPM。最低值是极值统计量，
+#      门槛必须更高（8 而不是 5），否则正常波动会常态性触发。
+# 为什么不能只用 ①：2026-10-12 那次的静息心率是「整段抬起来」而不是单夜尖峰
+# （50→59，中位 56.5，最新只比中位高 2.5，但比最低值高 9）—— 只用中位数会漏掉
+# 它。反过来只用 ②（原实现）则会被极值带偏：2026-11-17 中位 55、最新 57、
+# 最低 51，只高 6 就砍掉整周强度，而当天 HRV 65 完全正常、TSB 只有 -1。
+# 样本不足 3 天时中位数没有意义，退回 ② 的原门槛（保守）。
+RHR_ELEVATION_BPM = 5.0     # 最新值高于**中位数**多少算急性尖峰
+RHR_SHIFT_BPM = 8.0         # 最新值高于**最低值**多少算整体抬高
+RHR_MIN_SAMPLES = 3         # 少于这么多天就不用中位数判急性
+RHR_RISE_DAYS = 3           # 连续上升多少天算慢性漂移
 
 
 def _rising_streak(values):
@@ -470,6 +483,13 @@ def autonomic_gate(hrv_last=None, hrv_status=None, hrv_baseline=None,
 
     hrv_baseline 用 Garmin 自己给的 `baseline`（lowUpper / balancedLow /
     balancedUpper）—— 比自己拍一个阈值靠谱。rhr_series 为 [(date, rhr), ...]。
+
+    ⚠️ RHR 判据 2026-11-17 改过。原实现是「最新值 − 窗口最低值 ≥ 5」，
+    最低值是极值统计量，正常人的日常波动就常态性越过 5bpm —— 实测 11/17
+    中位 55、最新 57、最低 51，被判成「异常抬升 6bpm」整周砍掉强度，
+    而同日 HRV 65 完全正常、TSB 仅 −1、前一晚刚打完阈值 3×12（夜间 RHR
+    抬高属正常）。现在拆成「vs 中位数」（急性尖峰，门槛 5）与
+    「vs 最低值」（整体抬高，门槛 8）两条互补判据，见上方常量注释。
     """
     reasons = []
     base = hrv_baseline or {}
@@ -489,7 +509,19 @@ def autonomic_gate(hrv_last=None, hrv_status=None, hrv_baseline=None,
     rise = _rising_streak(vals)
     if rise >= RHR_RISE_DAYS:
         reasons.append(f"静息心率连续 {rise} 天上升")
+    elif len(vals) >= RHR_MIN_SAMPLES:
+        # ① 急性尖峰：中位数是稳健中心趋势，单夜波动推不动它。
+        med = statistics.median(vals)
+        if vals[-1] - med >= RHR_ELEVATION_BPM:
+            reasons.append(f"静息心率 {vals[-1]:.0f}，比近 {len(vals)} 天中位 "
+                           f"{med:.0f} 高 {vals[-1] - med:.0f} bpm")
+        # ② 整体抬高：整段都起来了，中位数跟着一起漂，只有挨着最低值才看得出来。
+        elif vals[-1] - min(vals) >= RHR_SHIFT_BPM:
+            reasons.append(f"静息心率 {vals[-1]:.0f}，比近 {len(vals)} 天最低 "
+                           f"{min(vals):.0f} 高 {vals[-1] - min(vals):.0f} bpm"
+                           f"（整段抬高，非单夜波动）")
     elif vals and vals[-1] - min(vals) >= RHR_ELEVATION_BPM:
+        # 样本不足 3 天：中位数无意义，退回原判据（保守，宁可拦）。
         reasons.append(f"静息心率 {vals[-1]:.0f}，比近期最低 {min(vals):.0f} "
                        f"高 {vals[-1] - min(vals):.0f} bpm")
 
