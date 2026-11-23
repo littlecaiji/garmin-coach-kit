@@ -595,7 +595,9 @@ def build_plan(ftp, hot=False, state=None):
                 f"{NAME_PREFIX}·FTP 测试（CP20）",
                 "FTP 测试：热身20min → 5min全力（清糖原，不计结果）→ 恢复10min"
                 " → 20min全力（这一段决定 FTP）→ 冷身10min。"
-                "全程选平路或稳定台子，别中途换姿势；20min 段尽量匀速不要起步冲。",
+                "⚠️ 室内先把 ERG 关掉、切坡度/阻力模式，靠换挡+踏频控功率；"
+                "ERG 会把功率锁住，测不出真实上限。"
+                "测试段选一个 cadence 固定（85-90），尽量少换挡；匀速起步别第 1 分钟就冲。",
                 CYCLING,
                 [
                     _step(1, 600, "warmup", 1, POWER, float(z1_lo), float(z1_hi),
