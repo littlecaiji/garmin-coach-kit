@@ -83,6 +83,16 @@ PHASE_LONG_CAP = {"base": 330, "build": 330, "peak": 360, "taper": 150, "post": 
 # 单日训练的实际上限，再长就开始影响恢复和下一次质量课，收益转负。
 LONG_RIDE_HARD_CAP = 360
 
+# 长骑的强度上限（IF = NP / FTP）。「时长骑够了」不等于「长骑达标」——
+# 2026-11-21 实测：232min / 99.2km / 747m，平均 143W 确实在 Z2，但 NP 184W、
+# IF 0.87、最大 706W、无氧 TE 3.5，单次 TSS 290 是计划 125 的 2.3 倍 ——
+# 爬坡被当成间歇骑了。旧逻辑只看时长，于是给出「✅ 达标，再稳一周上调基准」，
+# **等于奖励了执行偏差**，接着就是周 TSS 失控（W46 202 → W47 445）。
+#
+# 门槛取 0.75 而不是教练口径的 0.70：山地路线 IF 天然偏高，用 0.70 会把
+# 正常爬坡的 Z2 长骑判成违规。0.75 以上就不可能是「守着 Z2 骑完」了。
+LONG_RIDE_IF_MAX = 0.75
+
 # ── 力量课的三种档位 ──────────────────────────────────────────────────────
 # 每个档位包含「一周要几次」和「用哪套动作表」两件事：
 #   full    → 2 次/周，A（主）+B（辅）—— 教练理想形态
@@ -178,6 +188,8 @@ DEFAULT_STATE = {
         "consecutive_long_ok": 0,
         # 最近一次长骑的实际时长 —— 爬坡专项的准入门槛（≥90min 才允许上专项）
         "last_long_min": 0,
+        # 最近一次长骑的 IF —— 判断「是不是骑成了节奏课」（见 _advance_endurance）
+        "last_long_if": 0,
     },
     "goal": {
         # 首次运行前请改成你自己的目标：赛历由 goal.date 驱动
@@ -696,16 +708,25 @@ def _advance_strength(state, sessions_done, log):
                    f"先做到 {target} 次再谈递进")
 
 
-def _advance_endurance(state, long_km, long_min, planned_min, log):
-    """长骑时长只随「真的骑完」向上爬，避免计划先涨上去人跟不上。"""
+def _advance_endurance(state, long_km, long_min, planned_min, log, long_if=0):
+    """长骑时长只随「真的骑完」向上爬，避免计划先涨上去人跟不上。
+
+    ⚠️ 「骑完」必须是**守住 Z2 骑完**，不是「时长凑够了」。只看时长会奖励
+    执行偏差：把长骑骑成节奏课的人，TSS 翻倍却拿到「达标」和更高的基准，
+    下一周的量就再也收不住。所以 IF 超过 LONG_RIDE_IF_MAX 时，本次不计入
+    「连续达标」，并在日志里说清楚原因 —— 让下一周的处方回到时长而非强度。
+    """
     e = state["endurance"]
     e["last_long_min"] = round(float(long_min), 1)
+    if long_if:
+        e["last_long_if"] = round(float(long_if), 2)
     if long_min <= 0:
         log.append("⚪ 上周没有长骑记录 —— 长骑基准维持 "
                    f"{e['long_ride_min']}min（周末长距离是核心课，本周优先补回）")
         return
     ratio = long_min / planned_min if planned_min else 0
-    if ratio >= 0.9:
+    too_hard = long_if and float(long_if) > LONG_RIDE_IF_MAX
+    if ratio >= 0.9 and not too_hard:
         e["consecutive_long_ok"] += 1
         if e["consecutive_long_ok"] >= 2 and e["long_ride_min"] < LONG_RIDE_HARD_CAP:
             old = e["long_ride_min"]
@@ -714,8 +735,15 @@ def _advance_endurance(state, long_km, long_min, planned_min, log):
             log.append(f"📈 长骑连续两周达标 → 基准 {old}min → "
                        f"**{e['long_ride_min']}min**（{long_km:.0f}km 起步，先加时长不加强度）")
         else:
-            log.append(f"✅ 上周长骑 {long_min:.0f}min/{long_km:.0f}km 达标，"
+            log.append(f"✅ 上周长骑 {long_min:.0f}min/{long_km:.0f}km 达标"
+                       f"（IF {float(long_if or 0):.2f}，守住 Z2），"
                        f"再稳一周把基准从 {e['long_ride_min']}min 上调")
+    elif too_hard:
+        e["consecutive_long_ok"] = 0
+        log.append(f"🔴 上周长骑 {long_min:.0f}min 时长够了，但 **IF {float(long_if):.2f}**"
+                   f"（上限 {LONG_RIDE_IF_MAX:.2f}）—— 骑成节奏课了，**不算 Z2 长骑达标**，"
+                   f"基准维持 {e['long_ride_min']}min。下次把爬坡功率压在 Z2 不冲、"
+                   f"下坡顺骑恢复：长骑练的是「后段还能输出」，不是把坡当间歇")
     else:
         e["consecutive_long_ok"] = 0
         log.append(f"🟡 上周长骑 {long_min:.0f}min（计划 {planned_min}min，"
@@ -856,6 +884,7 @@ def advance(state, compliance, tsb, today=None, gate=None):
             float(compliance.get("long_ride_min") or 0),
             float(compliance.get("planned_long_ride_min") or 0),
             log,
+            long_if=float(compliance.get("long_ride_if") or 0),
         )
         state["last_advanced_week"] = week
 
@@ -930,6 +959,9 @@ def compliance_from(sessions_quality, strength_sessions, long_act, ftp_estimate)
         "strength_sessions": strength_sessions,
         "long_ride_min": (long_act.get("duration", 0) or 0) / 60.0 if long_act else 0,
         "long_ride_km": (long_act.get("distance", 0) or 0) / 1000.0 if long_act else 0,
+        # IF 用来判断「是不是守着 Z2 骑完的」。缺字段时给 0，代表「不作强度判定」——
+        # 宁可放过也不能因为字段缺失就冤枉一次正常长骑。
+        "long_ride_if": (long_act.get("intensityFactor", 0) or 0) if long_act else 0,
         "ftp_estimate": ftp_estimate,
     }
 

@@ -1421,8 +1421,10 @@ def _write_state_section(state, decisions):
                    "minimal": "B 精简版单次（1 次/周）"}.get(_eff_mode, _eff_mode)
     out += (f"| 力量模式 | {_mode_label} "
             f"| 断档 {s['consecutive_missed']} 周 / 连续完成 {s['consecutive_done']} 周 |\n")
+    _long_if = float(e.get("last_long_if") or 0)
+    _if_note = (f" · 上次 IF {_long_if:.2f}" if _long_if else "")
     out += (f"| 长骑基准 | {e['long_ride_min']}min "
-            f"| 连续达标 {e['consecutive_long_ok']} 周 |\n")
+            f"| 连续达标 {e['consecutive_long_ok']} 周{_if_note} |\n")
     out += (f"| 负重 | 臀桥 {w['bridge']:g}kg · 硬拉 {w['rdl']:g}kg · "
             f"分腿蹲 {w['split_squat']:g}kg/手 | 见下方决策 |\n")
     out += f"| FTP | {st_ftp:.0f}W | 本次估算 {state['ftp'].get('estimate') or '—'} |\n\n"

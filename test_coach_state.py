@@ -131,6 +131,43 @@ check("未达标不涨", run({"strength_sessions": 2, "quality": {}, "long_ride_
                         "long_ride_min": 40, "planned_long_ride_min": 165},
                        state=st)[0]["endurance"]["long_ride_min"], 165)
 
+print("\n── 7b. 长骑「时长够了但骑成节奏课」不算达标 ──")
+# 2026-11-21 实测：232min / 99.2km / 747m，平均 143W 在 Z2，但 NP 184W、IF 0.87、
+# 单次 TSS 290 是计划 125 的 2.3 倍 —— 爬坡被当成间歇骑。旧逻辑只看时长，
+# 给了「达标」和更高的基准，等于奖励执行偏差。
+_hard = {"strength_sessions": 2, "quality": {}, "long_ride_km": 99.2,
+         "long_ride_min": 232, "planned_long_ride_min": 180, "long_ride_if": 0.87}
+_st, _log = run(_hard, state=base())
+check("IF 0.87 → 基准不涨", _st["endurance"]["long_ride_min"], 135)
+check("IF 0.87 → 连续达标清零", _st["endurance"]["consecutive_long_ok"], 0)
+check("IF 0.87 → 日志点明「骑成节奏课」",
+      any("骑成节奏课" in x for x in _log), True)
+check("IF 0.87 → IF 落盘", _st["endurance"]["last_long_if"], 0.87)
+
+# 同样的时长，守住 Z2 就应该正常达标 —— 门槛不能误伤正常长骑
+_ok = dict(_hard, long_ride_if=0.65)
+_st, _log = run(_ok, state=base())
+check("IF 0.65 → 正常达标", _st["endurance"]["consecutive_long_ok"], 1)
+check("IF 0.65 → 日志不再提节奏课",
+      any("骑成节奏课" in x for x in _log), False)
+
+# 边界：恰好 0.75 放行，0.76 拦截（用 > 而不是 >=，山地路线留一点余量）
+check("IF 恰好 0.75 → 放行",
+      run(dict(_hard, long_ride_if=0.75), state=base())[0]["endurance"]["consecutive_long_ok"], 1)
+check("IF 0.76 → 拦",
+      run(dict(_hard, long_ride_if=0.76), state=base())[0]["endurance"]["consecutive_long_ok"], 0)
+
+# 字段缺失（旧活动 / 未传）绝不冤枉 —— 退回纯时长判定
+check("IF 缺失 → 只按时长判定，放行",
+      run({k: v for k, v in _hard.items() if k != "long_ride_if"},
+          state=base())[0]["endurance"]["consecutive_long_ok"], 1)
+
+# 连续硬骑两周也不该攒出「连续达标」
+_st = base()
+_st, _ = run(_hard, state=_st)
+_st, _ = run(_hard, state=_st)
+check("连续两周硬骑 → 基准仍 135", _st["endurance"]["long_ride_min"], 135)
+
 print("\n── 8. FTP 不被自动上调 ──")
 st, log = run({"strength_sessions": 2, "quality": {}, "long_ride_km": 0,
                "long_ride_min": 0, "ftp_estimate": 225.0})
