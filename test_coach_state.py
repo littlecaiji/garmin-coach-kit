@@ -555,6 +555,41 @@ check("日期格式非法 → None（不抛异常）",
 check("goal 缺失 → None",
       cs.race_day({"goal": {}}, today=_WEEK0), None)
 
+# ── FTP 测试日占位（ftp_test_day）────────────────────────────────────────
+# 与赛日同一套特殊日机制：模板只按 weekday 排课，不认识「这天要测 FTP」。
+# 报告与推课表必须读同一个判定，否则会出现「报告写测试日、手表推阈值课」。
+def _with_ftp_test(date_str):
+    s = base()
+    s["ftp_test"] = {"date": date_str}
+    return s
+
+
+check("未配置测试日 → None", cs.ftp_test_day(base(), today=_WEEK0), None)
+check("测试日=本周一 → offset 0 / days_to 0",
+      ((cs.ftp_test_day(_with_ftp_test("2026-10-12"), today=_WEEK0) or {}).get("offset"),
+       (cs.ftp_test_day(_with_ftp_test("2026-10-12"), today=_WEEK0) or {}).get("days_to")),
+      (0, 0))
+check("测试日=本周三 → offset 2",
+      (cs.ftp_test_day(_with_ftp_test("2026-10-14"), today=_WEEK0) or {}).get("offset"), 2)
+check("测试日=本周日 → offset 6",
+      (cs.ftp_test_day(_with_ftp_test("2026-10-18"), today=_WEEK0) or {}).get("offset"), 6)
+check("测试日=下周一 → 不在本周窗口，None",
+      cs.ftp_test_day(_with_ftp_test("2026-10-19"), today=_WEEK0), None)
+check("测试日已过 → None（不需要手工清 state）",
+      cs.ftp_test_day(_with_ftp_test("2026-10-11"), today=_WEEK0), None)
+check("测试日格式非法 → None（不抛异常）",
+      cs.ftp_test_day(_with_ftp_test("10/12/2026"), today=_WEEK0), None)
+check("ftp_test 整个字段缺失 → None",
+      cs.ftp_test_day({}, today=_WEEK0), None)
+check("测试日不应影响赛日判定（两者互不干扰）",
+      cs.race_day(_with_ftp_test("2026-10-12"), today=_WEEK0), None)
+
+# CP20 协议总时长必须和推课表里那条 workout 的 duration 对得上，
+# 否则手表上显示 65min、实际步骤只有 55min（已踩过这类错位）。
+check("CP20 协议总时长 = 65min",
+      (cs.CP20_WARMUP_MIN + cs.CP20_BLOWOUT_MIN + cs.CP20_RECOVER_MIN
+       + cs.CP20_TEST_MIN + cs.CP20_COOLDOWN_MIN), 65)
+
 # ── 身体指标取数（analyze_training._fetch_body_metrics）────────────────────
 # 锁两件事：
 #   1) 「昨夜 HRV」必须取到**今天凌晨**那一夜，不能停在「上周日」——

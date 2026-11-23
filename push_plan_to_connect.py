@@ -579,6 +579,45 @@ def build_plan(ftp, hot=False, state=None):
                 ),
             ))
         plan.sort(key=lambda p: p[0])
+
+    # ── FTP 测试日：顶掉当天的常规课，只推 CP20 结构 ────────────────────
+    # 与赛日同一套做法（读 coach_state.ftp_test_day）：报告和手表必须读同一个
+    # 判定，否则会出现「报告写测试日、手表推阈值课」。
+    # 20min 全力段刻意**不设功率目标** —— 测试的意义就是测出你真实的极限，
+    # 给个区间反而会让人「按区间骑」从而低估。5min 清糖原段同理。
+    _ftp_test = coach_state.ftp_test_day(st)
+    if _ftp_test:
+        _fo = _ftp_test["offset"]
+        plan = [p for p in plan if p[0] != _fo]
+        plan.append((
+            _fo, d(_fo),
+            _workout(
+                f"{NAME_PREFIX}·FTP 测试（CP20）",
+                "FTP 测试：热身20min → 5min全力（清糖原，不计结果）→ 恢复10min"
+                " → 20min全力（这一段决定 FTP）→ 冷身10min。"
+                "全程选平路或稳定台子，别中途换姿势；20min 段尽量匀速不要起步冲。",
+                CYCLING,
+                [
+                    _step(1, 600, "warmup", 1, POWER, float(z1_lo), float(z1_hi),
+                          desc=f"热身 Z1 {z1_lo}-{z1_hi}W"),
+                    _step(2, 600, "warmup", 1, POWER, float(z2r_lo), float(z2r_hi),
+                          desc=f"热身 Z2 {z2r_lo}-{z2r_hi}W，末尾做 3×30s 加速"),
+                    _step(3, coach_state.CP20_BLOWOUT_MIN * 60, "active", 8, NO_TARGET,
+                          desc="5min 全力：清糖原，耗尽无氧储备，这一段不计入结果"),
+                    _step(4, coach_state.CP20_RECOVER_MIN * 60, "recovery", 4, NO_TARGET,
+                          desc="轻松骑 10min，完全恢复再开始"),
+                    _step(5, coach_state.CP20_TEST_MIN * 60, "active", 8, NO_TARGET,
+                          desc="20min 全力 —— 这一段决定 FTP。匀速起步，别第一分钟就冲"),
+                    _step(6, coach_state.CP20_COOLDOWN_MIN * 60, "cooldown", 2,
+                          POWER, float(z1_lo), float(z1_hi),
+                          desc=f"冷身 Z1 {z1_lo}-{z1_hi}W"),
+                ],
+                (coach_state.CP20_WARMUP_MIN + coach_state.CP20_BLOWOUT_MIN
+                 + coach_state.CP20_RECOVER_MIN + coach_state.CP20_TEST_MIN
+                 + coach_state.CP20_COOLDOWN_MIN) * 60,
+            ),
+        ))
+        plan.sort(key=lambda p: p[0])
     return plan
 
 

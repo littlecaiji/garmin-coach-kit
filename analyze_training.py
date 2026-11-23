@@ -1579,6 +1579,13 @@ def _write_weekly_plan(ftp, tsb, strength_done, ftp_str, heat=None, state=None,
     # 不认识「周日那天就是比赛」—— 必须显式占位，否则会给赛日排力量、
     # 给赛前一天排长骑（2026-11-02 实测）。
     race = coach_state.race_day(st)
+    # 本周是否有排定的 FTP 测试（见 coach_state.ftp_test_day）。与赛日同理：
+    # 模板只按 weekday 排课，不认识「这天要测 FTP」，必须显式占位，
+    # 而且要占在**表、详情、周 TSS** 三处，否则报告自己会打架。
+    ftp_test = coach_state.ftp_test_day(st)
+    if ftp_test and (blocked or race):
+        # 自主神经没恢复时做 20min 全力是明确不该做的事；赛周更不该测 —— 顺延。
+        ftp_test = None
 
     # 功率区间一律以 state 的**校准 FTP** 为准。ftp 参数只是没有 state 时的
     # 兜底 —— 不再信任调用方传进来的值，免得又出现「调整依据表一个区间、
@@ -1622,6 +1629,23 @@ def _write_weekly_plan(ftp, tsb, strength_done, ftp_str, heat=None, state=None,
         # 否则报告里会留下「已取消的课」的 TSS，和课表自相矛盾。
         t_thr = t_vo2 = 0
         week_tss = 3 * t_z2 + t_lng
+    # FTP 测试日会把当天的质量课顶掉，周 TSS 必须同步换掉那一节，
+    # 否则表里写着 68 而合计还含着一节没排的阈值课。
+    CP20_TOTAL_MIN = (coach_state.CP20_WARMUP_MIN + coach_state.CP20_BLOWOUT_MIN
+                      + coach_state.CP20_RECOVER_MIN + coach_state.CP20_TEST_MIN
+                      + coach_state.CP20_COOLDOWN_MIN)
+    t_test = coach_state.session_tss([
+        (coach_state.CP20_WARMUP_MIN, 0.60),
+        (coach_state.CP20_BLOWOUT_MIN, 1.05),
+        (coach_state.CP20_RECOVER_MIN, 0.55),
+        (coach_state.CP20_TEST_MIN, 1.05),
+        (coach_state.CP20_COOLDOWN_MIN, 0.55),
+    ])
+    if ftp_test:
+        if ftp_test["offset"] == 0:
+            week_tss = week_tss - t_thr + t_test
+        elif ftp_test["offset"] == 2:
+            week_tss = week_tss - t_vo2 + t_test
     over_cap = week_tss > tss_cap
 
     report = "\n### 🗓️ 本周建议训练安排（极化 80/20）\n\n"
@@ -1645,6 +1669,14 @@ def _write_weekly_plan(ftp, tsb, strength_done, ftp_str, heat=None, state=None,
         report += (f"> 基于当前状态（TSB={tsb:+.0f}）与体能 {ftp_str}{hn}。框架：**大量 Z2 有氧打底 "
                    f"+ 每周仅 1–2 次高质量（阈值/间歇），Z3 节奏区尽量砍掉**；高强度≤2 次且与长骑隔天；"
                    f"骑行踏频全程 80–90rpm。可按体感微调。\n\n")
+    if ftp_test:
+        report += (
+            f"> 📊 **{WEEKDAY_CN[ftp_test['offset']]}（{ftp_test['date']}）做 FTP 测试（CP20）**"
+            f"，那天不排阈值课。\n"
+            "> 目的：测出真实 FTP，把整套区间重算一遍 —— 现在用的 214W 是 9/21 校准的，"
+            "已经落后于你的实际能力（最近能 20min 保 250W，说明阈值/长骑区间都偏低一档）。\n"
+            "> **测试前 48h 不做强度课、前一天睡够、当天别空腹**；测完把 20min 平均功率告诉教练，"
+            "由人确认后再改 state 里的 FTP。\n\n")
 
     # ---- overview table (scan-at-a-glance) ----
     thr_dur = f"≈{15 + thr_sets * (thr_reps + 5) + 10}min"
@@ -1692,6 +1724,10 @@ def _write_weekly_plan(ftp, tsb, strength_done, ftp_str, heat=None, state=None,
             ov[_po] = (WEEKDAY_CN[_po], "🚴 Z2 开腿（赛前唤醒）", "≈45min", z2r, "25")
         ov[_ro] = (WEEKDAY_CN[_ro], f"🏁 比赛日 · {race['name']}",
                    "—", "按比赛计划", "—")
+    if ftp_test:
+        _fo = ftp_test["offset"]
+        ov[_fo] = (WEEKDAY_CN[_fo], "📊 FTP 测试（CP20）", f"≈{CP20_TOTAL_MIN}min",
+                   "20min 全力（无功率目标）", f"{t_test:.0f}")
     report += "| 日 | 类型 | 时长 | 主强度 | TSS |\n|:--:|:--|:--:|:--:|:--:|\n"
     for d, t, dur, intensity, tss in ov:
         report += f"| {d} | {t} | {dur} | {intensity} | {tss} |\n"
@@ -1891,6 +1927,24 @@ def _write_weekly_plan(ftp, tsb, strength_done, ftp_str, heat=None, state=None,
             "**完赛优先于成绩。** 目标是骑完，不是某个时间。",
         ])
 
+    # ── FTP 测试日：覆盖当天按 weekday 生成的那一块 ──────────────────────
+    if ftp_test:
+        _fo = ftp_test["offset"]
+        details[_fo] = (f"{WEEKDAY_CN[_fo]} · 📊 FTP 测试（CP20）", [
+            f"**目标**：测出真实 FTP，把整套功率区间重算一遍。现在用的 {ftp:.0f}W 是 9/21 校准的，"
+            "已经落后于你的实际能力（最近能 20min 保 250W，说明阈值和长骑区间都偏低一档）。",
+            "**前提**：测试前 48h 不做强度课、前一天睡够、当天别空腹。**今天不排力量课。**",
+            f"**热身 {coach_state.CP20_WARMUP_MIN}min**：10min Z1 + 10min Z2，末尾 3×30s 加速唤醒。",
+            f"**清糖原 {coach_state.CP20_BLOWOUT_MIN}min 全力**（不计入结果）—— 省掉这步会高估结果。",
+            f"**恢复 {coach_state.CP20_RECOVER_MIN}min** 轻松骑，完全缓过来再开始。",
+            f"**测试 {coach_state.CP20_TEST_MIN}min 全力**：匀速起步，第 1 分钟别冲；"
+            "前 5min 控住、中段稳住、最后 3min 掏空。**只看还能不能维持，别看心率。**",
+            f"**冷身 {coach_state.CP20_COOLDOWN_MIN}min** Z1。",
+            "**FTP = CP20 × 0.95**。把 20min 平均功率发我，我确认后再改 state 里的 FTP —— "
+            "不自动上调，因为区间一改，后面所有课的目标功率都会跟着变。",
+            f"**TSS≈{t_test:.0f}**。",
+        ])
+
     report += "\n**每日详细（可直接照练）**\n\n"
     for title, lines in details:
         report += f"**{title}**\n"
@@ -1921,6 +1975,10 @@ def _write_weekly_plan(ftp, tsb, strength_done, ftp_str, heat=None, state=None,
     elif race:
         dist = ("极化分布：**减量周 —— 全周无质量课**，赛前一天开腿、赛日比赛。"
                 "赛前一周上强度只会消耗糖原、增加肌肉微损伤，收益为负。")
+    elif ftp_test:
+        dist = ("极化分布：本周只有一节常规质量课 —— FTP 测试本身就要全力输出 20min，"
+                "已经占掉一次高强度刺激，所以被它顶掉的那节质量课**不再补回**。"
+                "测试后按新 FTP 重算区间，从下周开始用新目标。")
     else:
         dist = ("极化分布：Z2 为底、2 次高质量（周一阈值 + 周三间歇），Z3≈0。"
                 "周二/周四完全休息；高强度与长骑隔天安排（周三间歇 → 周六长骑中间隔周四休息+周五Z2），避免连休后集中爆发。")

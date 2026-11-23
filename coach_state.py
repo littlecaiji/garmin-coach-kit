@@ -201,6 +201,9 @@ DEFAULT_STATE = {
     # last_advanced_week 是「同一周只推进一次」的幂等标记（ISO 年-周）。
     # 没有它，同周重复运行会把档位/负重反复顶上去 —— 见 advance() 里的说明。
     "last_advanced_week": None,
+    # FTP 测试日（空 = 不排）。见 ftp_test_day()；到那天会用 CP20 协议
+    # 顶掉当天的质量课，报告与手表读同一个判定。
+    "ftp_test": {"date": ""},
     "decisions": [],
 }
 
@@ -777,9 +780,53 @@ def week_key(dt):
     return f"{iso[0]}-W{iso[1]:02d}"
 
 
+# ── FTP 测试（CP20）────────────────────────────────────────────────────────
+# 与 race_day() 同一套「特殊日」思路：排课模板只按 weekday 套结构，不认识
+# 「这天要做 FTP 测试」。报告与推课表必须读同一个判定，否则会出现
+# 「报告写测试日、手表推阈值课」。测试日只占位，不改任何档位/负重。
+#
+# 协议：热身 20min 渐进 → 5min 全力清糖原（不计结果）→ 10min 恢复
+#       → **20min 全力（这一段决定 FTP）** → 冷身 10min
+# FTP = CP20 × 0.95（与 2026-09-21 那次校准同一套算法）。
+CP20_WARMUP_MIN = 20
+CP20_BLOWOUT_MIN = 5
+CP20_RECOVER_MIN = 10
+CP20_TEST_MIN = 20
+CP20_COOLDOWN_MIN = 10
+
+
+def ftp_test_day(state, today=None):
+    """本周（周一–周日）内是否有排定的 FTP 测试；有则返回占位信息，否则 None。
+
+    配置写在 state 的 `ftp_test.date`。字段与 race_day() 对齐：
+    offset / date / days_to / name —— 两个消费端可以用同一段代码处理。
+    测试日一过（days_to < 0）自然失效，不需要额外清理 state。
+    """
+    raw = str(((state.get("ftp_test") or {}).get("date")) or "").strip()
+    if not raw:
+        return None
+    try:
+        rd = datetime.strptime(raw, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+    t = (today or datetime.now()).date()
+    days_to = (rd - t).days
+    if days_to < 0:              # 已经测完了，不再占位
+        return None
+    mon = t - timedelta(days=t.weekday())
+    off = (rd - mon).days
+    if not (0 <= off <= 6):      # 不在本周窗口内
+        return None
+    return {
+        "offset": off,
+        "date": rd.strftime("%Y-%m-%d"),
+        "days_to": days_to,
+        "name": "FTP 测试（CP20）",
+    }
+
+
 def race_day(state, today=None):
     """本周（周一–周日）里是否有目标比赛日；有则返回占位信息，否则 None。
-
     为什么需要它：排课模板只按 weekday 套结构，`goal_phase()` 只判阶段，
     **没人知道「周日那天就是比赛」**。2026-11-02 实测踩到：`goal.date=2026-11-08`
     是周日、phase 已判 taper，可课表给周日排了「力量B 精简版」、给周六排了
